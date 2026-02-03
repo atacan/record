@@ -38,6 +38,7 @@ recordit [--duration <seconds>] [--output <path>] [--name <pattern>] [--overwrit
 - `--resume-key <char>`: Resume key (single ASCII character). Default: `r` (case-insensitive). If same as pause key, toggles pause/resume.
 - `--silence-db <db>`: Silence threshold in dBFS (e.g. `-50`). Requires `--silence-duration`.
 - `--silence-duration <seconds>`: Stop after this many seconds of continuous silence. Requires `--silence-db`.
+- `--max-size <mb>`: Stop when output file reaches this size in MB.
 - `--sample-rate <hz>`: Sample rate in Hz. Default: `44100`.
 - `--channels <count>`: Number of channels. Default: `1`.
 - `--bit-rate <bps>`: Encoder bit rate in bps. Default: `128000`. Ignored for `linearPCM`.
@@ -62,6 +63,7 @@ recordit --stop-key q --duration 30
 recordit --pause-key p --resume-key r
 recordit --pause-key p --resume-key p
 recordit --silence-db -50 --silence-duration 3
+recordit --max-size 50
 recordit --output /tmp --name "micrec-%Y%m%d-%H%M%S-{uuid}"
 recordit --output /tmp/meeting.caf --overwrite
 recordit --duration 5 --json

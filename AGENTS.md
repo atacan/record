@@ -44,6 +44,7 @@ swift build
   - `--stop-key` sets the single-key stop shortcut (ASCII, case-insensitive).
   - `--pause-key` and `--resume-key` control pausing/resuming; if identical, the key toggles.
   - `--silence-db` + `--silence-duration` stops after continuous silence.
+  - `--max-size` stops when the output file reaches a size in MB.
 
 ## Testing notes
 

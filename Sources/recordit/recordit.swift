@@ -14,6 +14,7 @@ enum StopReason: String, Codable {
     case key
     case duration
     case silence
+    case maxSize
 }
 
 struct AudioInputDevice: Codable {
@@ -248,6 +249,8 @@ func waitForStopKeyOrDuration(
     pauseKeyDisplay: String,
     resumeKeyDisplay: String,
     togglePauseResume: Bool,
+    maxSizeBytes: Int64?,
+    outputURL: URL?,
     silence: SilenceConfig?,
     recorder: AudioRecorder?
 ) async throws -> StopReason {
@@ -260,6 +263,9 @@ func waitForStopKeyOrDuration(
     var silenceStart: Date?
     var buffer: UInt8 = 0
     var isPaused = false
+    let sizeInterval: TimeInterval = 0.5
+    var nextSizeCheck = Date()
+    let fileManager = FileManager.default
 
     while true {
         if Task.isCancelled {
@@ -269,6 +275,15 @@ func waitForStopKeyOrDuration(
         let now = Date()
         if let deadline, now >= deadline {
             return .duration
+        }
+
+        if let maxSizeBytes, let outputURL, now >= nextSizeCheck {
+            if let attrs = try? fileManager.attributesOfItem(atPath: outputURL.path),
+               let size = attrs[.size] as? NSNumber,
+               size.int64Value >= maxSizeBytes {
+                return .maxSize
+            }
+            nextSizeCheck = now.addingTimeInterval(sizeInterval)
         }
 
         if let silence, let recorder, !isPaused, now >= nextMeterCheck {
@@ -290,6 +305,9 @@ func waitForStopKeyOrDuration(
         var timeout = 0.25
         if let deadline {
             timeout = min(timeout, max(0, deadline.timeIntervalSince(now)))
+        }
+        if maxSizeBytes != nil, outputURL != nil {
+            timeout = min(timeout, max(0, nextSizeCheck.timeIntervalSince(now)))
         }
         if silence != nil, recorder != nil {
             timeout = min(timeout, max(0, nextMeterCheck.timeIntervalSince(now)))
@@ -435,6 +453,9 @@ struct MicRec: AsyncParsableCommand {
     @Option(help: "Stop after this many seconds of continuous silence. Requires --silence-db.")
     var silenceDuration: Double?
 
+    @Option(help: "Stop when output file reaches this size in MB.")
+    var maxSizeMB: Double?
+
     @Option(help: "Sample rate in Hz. Default: 44100.")
     var sampleRate: Double?
 
@@ -476,6 +497,9 @@ struct MicRec: AsyncParsableCommand {
         }
         if let silenceDuration, silenceDuration <= 0 {
             throw ValidationError("Silence duration must be greater than 0 seconds.")
+        }
+        if let maxSizeMB, maxSizeMB <= 0 {
+            throw ValidationError("Max size must be greater than 0 MB.")
         }
         if let sampleRate, sampleRate <= 0 {
             throw ValidationError("Sample rate must be greater than 0.")
@@ -705,6 +729,7 @@ struct MicRec: AsyncParsableCommand {
             } else {
                 silenceConfig = nil
             }
+            let maxSizeBytes = maxSizeMB.map { Int64($0 * 1_048_576) }
 
             let settings = buildSettings()
             let extensionOverride = (format ?? .linearPCM).fileExtension
@@ -728,6 +753,9 @@ struct MicRec: AsyncParsableCommand {
                     stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
                 }
             }
+            if let maxSizeMB {
+                stopMessage += " or when file reaches \(maxSizeMB) MB"
+            }
             if let silenceConfig {
                 stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
             }
@@ -745,6 +773,8 @@ struct MicRec: AsyncParsableCommand {
                 pauseKeyDisplay: pauseKeyDisplay,
                 resumeKeyDisplay: resumeKeyDisplay,
                 togglePauseResume: togglePauseResume,
+                maxSizeBytes: maxSizeBytes,
+                outputURL: url,
                 silence: silenceConfig,
                 recorder: recorder
             )
@@ -761,6 +791,7 @@ struct MicRec: AsyncParsableCommand {
                     let bitRate: Int?
                     let quality: String
                     let duration: Double?
+                    let maxSizeMB: Double?
                     let stopReason: StopReason
                 }
 
@@ -773,6 +804,7 @@ struct MicRec: AsyncParsableCommand {
                     bitRate: resolvedFormat == .linearPCM ? nil : (bitRate ?? 128_000),
                     quality: (quality ?? .high).rawValue,
                     duration: duration,
+                    maxSizeMB: maxSizeMB,
                     stopReason: stopReason
                 )
                 let data = try JSONEncoder().encode(out)
