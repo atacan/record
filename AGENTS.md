@@ -40,6 +40,9 @@ swift build
   - `--device` can set a temporary default input device for the recording.
 - Discovery flags:
   - `--list-formats` and `--list-qualities` print available values and exit.
+- Stop controls:
+  - `--stop-key` sets the single-key stop shortcut (ASCII, case-insensitive).
+  - `--silence-db` + `--silence-duration` stops after continuous silence.
 
 ## Testing notes
 

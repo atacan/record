@@ -13,12 +13,18 @@ func log(_ message: String) {
 enum StopReason: String, Codable {
     case key
     case duration
+    case silence
 }
 
 struct AudioInputDevice: Codable {
     let id: AudioDeviceID
     let uid: String
     let name: String
+}
+
+struct SilenceConfig {
+    let db: Double
+    let duration: Double
 }
 
 // Read single key without requiring Enter
@@ -215,42 +221,70 @@ final class AudioRecorder {
         recorder?.stop()
         recorder = nil
     }
+
+    func setMeteringEnabled(_ enabled: Bool) {
+        recorder?.isMeteringEnabled = enabled
+    }
+
+    func averagePower() -> Float {
+        recorder?.updateMeters()
+        return recorder?.averagePower(forChannel: 0) ?? -160.0
+    }
 }
 
-func waitForStopKeyOrDuration(_ duration: Double?) async throws -> StopReason {
+func waitForStopKeyOrDuration(
+    _ duration: Double?,
+    stopKeys: Set<UInt8>,
+    silence: SilenceConfig?,
+    recorder: AudioRecorder?
+) async throws -> StopReason {
     let rawMode = TerminalRawMode()
+    defer { _ = rawMode }
+
     let deadline = duration.map { Date().addingTimeInterval($0) }
+    let meterInterval: TimeInterval = 0.2
+    var nextMeterCheck = Date()
+    var silenceStart: Date?
+    var buffer: UInt8 = 0
 
-    return withExtendedLifetime(rawMode) {
-        var buffer: UInt8 = 0
+    while true {
+        if Task.isCancelled {
+            return .key
+        }
 
-        while true {
-            if Task.isCancelled {
-                return .key
-            }
+        let now = Date()
+        if let deadline, now >= deadline {
+            return .duration
+        }
 
-            if let deadline, deadline.timeIntervalSinceNow <= 0 {
-                return .duration
-            }
-
-            var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
-            let timeoutMs: Int32
-            if let deadline {
-                let remaining = max(0, deadline.timeIntervalSinceNow)
-                let slice = min(remaining, 0.25)
-                timeoutMs = Int32(max(1, Int(slice * 1000)))
-            } else {
-                timeoutMs = 250
-            }
-
-            let ready = poll(&fds, 1, timeoutMs)
-            if ready > 0 && (fds.revents & Int16(POLLIN)) != 0 {
-                let count = read(STDIN_FILENO, &buffer, 1)
-                if count == 1 {
-                    if buffer == UInt8(ascii: "s") || buffer == UInt8(ascii: "S") {
-                        return .key
-                    }
+        if let silence, let recorder, now >= nextMeterCheck {
+            let power = await MainActor.run { recorder.averagePower() }
+            if Double(power) <= silence.db {
+                silenceStart = silenceStart ?? now
+                if let silenceStart, now.timeIntervalSince(silenceStart) >= silence.duration {
+                    return .silence
                 }
+            } else {
+                silenceStart = nil
+            }
+            nextMeterCheck = now.addingTimeInterval(meterInterval)
+        }
+
+        var timeout = 0.25
+        if let deadline {
+            timeout = min(timeout, max(0, deadline.timeIntervalSince(now)))
+        }
+        if silence != nil, recorder != nil {
+            timeout = min(timeout, max(0, nextMeterCheck.timeIntervalSince(now)))
+        }
+        let timeoutMs = Int32(max(1, Int(timeout * 1000)))
+
+        var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&fds, 1, timeoutMs)
+        if ready > 0 && (fds.revents & Int16(POLLIN)) != 0 {
+            let count = read(STDIN_FILENO, &buffer, 1)
+            if count == 1, stopKeys.contains(buffer) {
+                return .key
             }
         }
     }
@@ -340,6 +374,15 @@ struct MicRec: AsyncParsableCommand {
     @Option(help: "Input device UID or name to use for recording.")
     var device: String?
 
+    @Option(help: "Stop key (single ASCII character). Default: s.")
+    var stopKey: String?
+
+    @Option(help: "Silence threshold in dBFS (e.g. -50). Requires --silence-duration.")
+    var silenceDB: Double?
+
+    @Option(help: "Stop after this many seconds of continuous silence. Requires --silence-db.")
+    var silenceDuration: Double?
+
     @Option(help: "Sample rate in Hz. Default: 44100.")
     var sampleRate: Double?
 
@@ -358,6 +401,19 @@ struct MicRec: AsyncParsableCommand {
     mutating func validate() throws {
         if let duration, duration <= 0 {
             throw ValidationError("Duration must be greater than 0 seconds.")
+        }
+        if let stopKey {
+            guard stopKey.count == 1,
+                  let scalar = stopKey.unicodeScalars.first,
+                  scalar.isASCII else {
+                throw ValidationError("Stop key must be a single ASCII character.")
+            }
+        }
+        if (silenceDB == nil) != (silenceDuration == nil) {
+            throw ValidationError("Both --silence-db and --silence-duration must be provided together.")
+        }
+        if let silenceDuration, silenceDuration <= 0 {
+            throw ValidationError("Silence duration must be greater than 0 seconds.")
         }
         if let sampleRate, sampleRate <= 0 {
             throw ValidationError("Sample rate must be greater than 0.")
@@ -451,6 +507,24 @@ struct MicRec: AsyncParsableCommand {
         let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid)
         let tempDir = fileManager.temporaryDirectory
         return tempDir.appendingPathComponent(ensureExtension(filename))
+    }
+
+    func resolveStopKeys() throws -> Set<UInt8> {
+        let key = stopKey ?? "s"
+        guard key.count == 1, let scalar = key.unicodeScalars.first, scalar.isASCII else {
+            throw ValidationError("Stop key must be a single ASCII character.")
+        }
+
+        var keys: Set<UInt8> = [UInt8(scalar.value)]
+        if scalar.properties.isAlphabetic {
+            if let upper = String(key).uppercased().unicodeScalars.first {
+                keys.insert(UInt8(upper.value))
+            }
+            if let lower = String(key).lowercased().unicodeScalars.first {
+                keys.insert(UInt8(lower.value))
+            }
+        }
+        return keys
     }
 
     mutating func run() async throws {
@@ -554,6 +628,14 @@ struct MicRec: AsyncParsableCommand {
                 }
             }
 
+            let stopKeys = try resolveStopKeys()
+            let silenceConfig: SilenceConfig?
+            if let silenceDB, let silenceDuration {
+                silenceConfig = SilenceConfig(db: silenceDB, duration: silenceDuration)
+            } else {
+                silenceConfig = nil
+            }
+
             let settings = buildSettings()
             let extensionOverride = (format ?? .linearPCM).fileExtension
             let url = try resolveOutputURL(extension: extensionOverride)
@@ -564,14 +646,27 @@ struct MicRec: AsyncParsableCommand {
 
             let recorder = await MainActor.run { AudioRecorder(outputURL: url, settings: settings) }
             try await MainActor.run { try recorder.start() }
-
-            if let duration {
-                log("Recording… will stop automatically after \(duration) seconds or when you press 'S'.")
-            } else {
-                log("Recording… press 'S' to stop.")
+            if silenceConfig != nil {
+                await MainActor.run { recorder.setMeteringEnabled(true) }
             }
 
-            let stopReason = try await waitForStopKeyOrDuration(duration)
+            let stopKeyDisplay = String((stopKey ?? "s").uppercased())
+            var stopMessage = "press '\(stopKeyDisplay)' to stop"
+            if let silenceConfig {
+                stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
+            }
+            if let duration {
+                log("Recording… will stop automatically after \(duration) seconds or when you \(stopMessage).")
+            } else {
+                log("Recording… \(stopMessage).")
+            }
+
+            let stopReason = try await waitForStopKeyOrDuration(
+                duration,
+                stopKeys: stopKeys,
+                silence: silenceConfig,
+                recorder: recorder
+            )
 
             await MainActor.run { recorder.stop() }
 
