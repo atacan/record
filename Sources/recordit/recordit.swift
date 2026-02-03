@@ -260,7 +260,7 @@ func waitForStopKeyOrDuration(
     defer { _ = rawMode }
 
     let deadline = duration.map { Date().addingTimeInterval($0) }
-    let splitDeadline = splitDuration.map { Date().addingTimeInterval($0) }
+    var splitRemaining = splitDuration
     let meterInterval: TimeInterval = 0.2
     var nextMeterCheck = Date()
     var silenceStart: Date?
@@ -269,6 +269,7 @@ func waitForStopKeyOrDuration(
     let sizeInterval: TimeInterval = 0.5
     var nextSizeCheck = Date()
     let fileManager = FileManager.default
+    var lastTick = Date()
 
     while true {
         if Task.isCancelled {
@@ -276,11 +277,18 @@ func waitForStopKeyOrDuration(
         }
 
         let now = Date()
+        let elapsed = now.timeIntervalSince(lastTick)
+        lastTick = now
         if let deadline, now >= deadline {
             return .duration
         }
-        if let splitDeadline, now >= splitDeadline {
-            return .split
+
+        if let remaining = splitRemaining, !isPaused {
+            let updated = remaining - elapsed
+            splitRemaining = updated
+            if updated <= 0 {
+                return .split
+            }
         }
 
         if let maxSizeBytes, let outputURL, now >= nextSizeCheck {
@@ -312,8 +320,8 @@ func waitForStopKeyOrDuration(
         if let deadline {
             timeout = min(timeout, max(0, deadline.timeIntervalSince(now)))
         }
-        if let splitDeadline {
-            timeout = min(timeout, max(0, splitDeadline.timeIntervalSince(now)))
+        if let splitRemaining, !isPaused {
+            timeout = min(timeout, max(0, splitRemaining))
         }
         if maxSizeBytes != nil, outputURL != nil {
             timeout = min(timeout, max(0, nextSizeCheck.timeIntervalSince(now)))

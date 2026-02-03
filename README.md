@@ -79,3 +79,4 @@ recordit --format linearPCM --sample-rate 44100 --channels 1
 - Microphone permission is required. In macOS: System Settings -> Privacy & Security -> Microphone -> enable your terminal app.
 - Stopping with `S` requires a real TTY (Terminal/iTerm). IDE consoles may not deliver single-key input.
 - With `--split --json`, the tool prints one JSON object per chunk (NDJSON).
+- While paused, split timing does not advance.
