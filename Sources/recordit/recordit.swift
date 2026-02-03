@@ -15,6 +15,7 @@ enum StopReason: String, Codable {
     case duration
     case silence
     case maxSize
+    case split
 }
 
 struct AudioInputDevice: Codable {
@@ -243,6 +244,7 @@ final class AudioRecorder {
 
 func waitForStopKeyOrDuration(
     _ duration: Double?,
+    splitDuration: Double?,
     stopKeys: Set<UInt8>,
     pauseKeys: Set<UInt8>,
     resumeKeys: Set<UInt8>,
@@ -258,6 +260,7 @@ func waitForStopKeyOrDuration(
     defer { _ = rawMode }
 
     let deadline = duration.map { Date().addingTimeInterval($0) }
+    let splitDeadline = splitDuration.map { Date().addingTimeInterval($0) }
     let meterInterval: TimeInterval = 0.2
     var nextMeterCheck = Date()
     var silenceStart: Date?
@@ -275,6 +278,9 @@ func waitForStopKeyOrDuration(
         let now = Date()
         if let deadline, now >= deadline {
             return .duration
+        }
+        if let splitDeadline, now >= splitDeadline {
+            return .split
         }
 
         if let maxSizeBytes, let outputURL, now >= nextSizeCheck {
@@ -305,6 +311,9 @@ func waitForStopKeyOrDuration(
         var timeout = 0.25
         if let deadline {
             timeout = min(timeout, max(0, deadline.timeIntervalSince(now)))
+        }
+        if let splitDeadline {
+            timeout = min(timeout, max(0, splitDeadline.timeIntervalSince(now)))
         }
         if maxSizeBytes != nil, outputURL != nil {
             timeout = min(timeout, max(0, nextSizeCheck.timeIntervalSince(now)))
@@ -417,7 +426,7 @@ struct MicRec: AsyncParsableCommand {
     @Option(help: "Write output to this file or directory. Default: temporary directory.")
     var output: String?
 
-    @Option(help: "Filename pattern when output is a directory. Supports strftime tokens and {uuid}. Default: micrec-%Y%m%d-%H%M%S.")
+    @Option(help: "Filename pattern when output is a directory. Supports strftime tokens, {uuid}, and {chunk}. Default: micrec-%Y%m%d-%H%M%S (or micrec-%Y%m%d-%H%M%S-{chunk} when splitting).")
     var name: String?
 
     @Flag(help: "Overwrite output file if it exists.")
@@ -455,6 +464,9 @@ struct MicRec: AsyncParsableCommand {
 
     @Option(help: "Stop when output file reaches this size in MB.")
     var maxSizeMB: Double?
+
+    @Option(help: "Split recording into chunks of this many seconds. Output must be a directory.")
+    var split: Double?
 
     @Option(help: "Sample rate in Hz. Default: 44100.")
     var sampleRate: Double?
@@ -501,6 +513,9 @@ struct MicRec: AsyncParsableCommand {
         if let maxSizeMB, maxSizeMB <= 0 {
             throw ValidationError("Max size must be greater than 0 MB.")
         }
+        if let split, split <= 0 {
+            throw ValidationError("Split duration must be greater than 0 seconds.")
+        }
         if let sampleRate, sampleRate <= 0 {
             throw ValidationError("Sample rate must be greater than 0.")
         }
@@ -538,7 +553,7 @@ struct MicRec: AsyncParsableCommand {
         return settings
     }
 
-    func formatFilename(pattern: String, date: Date, uuid: UUID) -> String {
+    func formatFilename(pattern: String, date: Date, uuid: UUID, chunkIndex: Int?) -> String {
         var t = time_t(date.timeIntervalSince1970)
         var tm = tm()
         localtime_r(&t, &tm)
@@ -551,13 +566,18 @@ struct MicRec: AsyncParsableCommand {
 
         let bytes = buffer.prefix(count).map { UInt8(bitPattern: $0) }
         let base = String(bytes: bytes, encoding: .utf8) ?? "micrec-\(uuid.uuidString)"
-        return base.replacingOccurrences(of: "{uuid}", with: uuid.uuidString)
+        var result = base.replacingOccurrences(of: "{uuid}", with: uuid.uuidString)
+        if let chunkIndex {
+            result = result.replacingOccurrences(of: "{chunk}", with: String(chunkIndex))
+        }
+        return result
     }
 
-    func resolveOutputURL(extension fileExtension: String) throws -> URL {
+    func resolveOutputURL(extension fileExtension: String, chunkIndex: Int? = nil, requireDirectory: Bool = false) throws -> URL {
         let fileManager = FileManager.default
         let uuid = UUID()
-        let pattern = name ?? "micrec-%Y%m%d-%H%M%S"
+        let defaultPattern = (chunkIndex == nil) ? "micrec-%Y%m%d-%H%M%S" : "micrec-%Y%m%d-%H%M%S-{chunk}"
+        let pattern = name ?? defaultPattern
 
         func ensureExtension(_ filename: String) -> String {
             let url = URL(fileURLWithPath: filename)
@@ -572,15 +592,27 @@ struct MicRec: AsyncParsableCommand {
             var isDirectory: ObjCBool = false
             if fileManager.fileExists(atPath: outputURL.path, isDirectory: &isDirectory) {
                 if isDirectory.boolValue {
-                    let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid)
+                    let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
                     return outputURL.appendingPathComponent(ensureExtension(filename))
+                }
+                if requireDirectory {
+                    throw ValidationError("Output must be a directory when using --split.")
                 }
                 return URL(fileURLWithPath: ensureExtension(outputURL.path))
             }
 
             if output.hasSuffix("/") {
                 try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
-                let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid)
+                let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
+                return outputURL.appendingPathComponent(ensureExtension(filename))
+            }
+
+            if requireDirectory {
+                if !outputURL.pathExtension.isEmpty {
+                    throw ValidationError("Output must be a directory when using --split.")
+                }
+                try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
+                let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
                 return outputURL.appendingPathComponent(ensureExtension(filename))
             }
 
@@ -590,7 +622,7 @@ struct MicRec: AsyncParsableCommand {
             return outputURL
         }
 
-        let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid)
+        let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
         let tempDir = fileManager.temporaryDirectory
         return tempDir.appendingPathComponent(ensureExtension(filename))
     }
@@ -731,87 +763,119 @@ struct MicRec: AsyncParsableCommand {
             }
             let maxSizeBytes = maxSizeMB.map { Int64($0 * 1_048_576) }
 
-            let settings = buildSettings()
             let extensionOverride = (format ?? .linearPCM).fileExtension
-            let url = try resolveOutputURL(extension: extensionOverride)
+            let overallDeadline = duration.map { Date().addingTimeInterval($0) }
+            let shouldSplit = split != nil
+            var chunkIndex = 1
 
-            if !overwrite && FileManager.default.fileExists(atPath: url.path) {
-                throw ValidationError("Output file already exists. Use --overwrite to replace it.")
-            }
-
-            let recorder = await MainActor.run { AudioRecorder(outputURL: url, settings: settings) }
-            try await MainActor.run { try recorder.start() }
-            if silenceConfig != nil {
-                await MainActor.run { recorder.setMeteringEnabled(true) }
-            }
-
-            var stopMessage = "press '\(stopKeyDisplay)' to stop"
-            if pauseKeyValue != stopKeyValue && resumeKeyValue != stopKeyValue {
-                if togglePauseResume {
-                    stopMessage += ", '\(pauseKeyDisplay)' to pause/resume"
-                } else {
-                    stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
-                }
-            }
-            if let maxSizeMB {
-                stopMessage += " or when file reaches \(maxSizeMB) MB"
-            }
-            if let silenceConfig {
-                stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
-            }
-            if let duration {
-                log("Recording… will stop automatically after \(duration) seconds or when you \(stopMessage).")
-            } else {
-                log("Recording… \(stopMessage).")
-            }
-
-            let stopReason = try await waitForStopKeyOrDuration(
-                duration,
-                stopKeys: stopKeys,
-                pauseKeys: pauseKeys,
-                resumeKeys: resumeKeys,
-                pauseKeyDisplay: pauseKeyDisplay,
-                resumeKeyDisplay: resumeKeyDisplay,
-                togglePauseResume: togglePauseResume,
-                maxSizeBytes: maxSizeBytes,
-                outputURL: url,
-                silence: silenceConfig,
-                recorder: recorder
-            )
-
-            await MainActor.run { recorder.stop() }
-
-            // stdout: print ONLY the URL (pipeline-friendly)
-            if json {
-                struct Output: Codable {
-                    let path: String
-                    let format: String
-                    let sampleRate: Double
-                    let channels: Int
-                    let bitRate: Int?
-                    let quality: String
-                    let duration: Double?
-                    let maxSizeMB: Double?
-                    let stopReason: StopReason
+            while true {
+                if let overallDeadline, overallDeadline <= Date() {
+                    break
                 }
 
-                let resolvedFormat = (format ?? .linearPCM)
-                let out = Output(
-                    path: url.path,
-                    format: resolvedFormat.rawValue,
-                    sampleRate: sampleRate ?? 44_100,
-                    channels: channels ?? 1,
-                    bitRate: resolvedFormat == .linearPCM ? nil : (bitRate ?? 128_000),
-                    quality: (quality ?? .high).rawValue,
-                    duration: duration,
-                    maxSizeMB: maxSizeMB,
-                    stopReason: stopReason
+                let url = try resolveOutputURL(
+                    extension: extensionOverride,
+                    chunkIndex: shouldSplit ? chunkIndex : nil,
+                    requireDirectory: shouldSplit
                 )
-                let data = try JSONEncoder().encode(out)
-                FileHandle.standardOutput.write(data)
-                FileHandle.standardOutput.write(Data("\n".utf8))
-            } else {
-                print(url.path())
+
+                if FileManager.default.fileExists(atPath: url.path) {
+                    if overwrite {
+                        try FileManager.default.removeItem(at: url)
+                    } else {
+                        throw ValidationError("Output file already exists. Use --overwrite to replace it.")
+                    }
+                }
+
+                let recorder = await MainActor.run { AudioRecorder(outputURL: url, settings: buildSettings()) }
+                try await MainActor.run { try recorder.start() }
+                if silenceConfig != nil {
+                    await MainActor.run { recorder.setMeteringEnabled(true) }
+                }
+
+                var stopMessage = "press '\(stopKeyDisplay)' to stop"
+                if pauseKeyValue != stopKeyValue && resumeKeyValue != stopKeyValue {
+                    if togglePauseResume {
+                        stopMessage += ", '\(pauseKeyDisplay)' to pause/resume"
+                    } else {
+                        stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
+                    }
+                }
+                if let split {
+                    stopMessage += ", split every \(split)s"
+                }
+                if let maxSizeMB {
+                    stopMessage += " or when file reaches \(maxSizeMB) MB"
+                }
+                if let silenceConfig {
+                    stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
+                }
+
+                let chunkLabel = shouldSplit ? " (chunk \(chunkIndex))" : ""
+                if let duration {
+                    log("Recording\(chunkLabel)… will stop automatically after \(duration) seconds or when you \(stopMessage).")
+                } else {
+                    log("Recording\(chunkLabel)… \(stopMessage).")
+                }
+
+                let remainingDuration = overallDeadline.map { max(0, $0.timeIntervalSinceNow) }
+                let stopReason = try await waitForStopKeyOrDuration(
+                    remainingDuration,
+                    splitDuration: split,
+                    stopKeys: stopKeys,
+                    pauseKeys: pauseKeys,
+                    resumeKeys: resumeKeys,
+                    pauseKeyDisplay: pauseKeyDisplay,
+                    resumeKeyDisplay: resumeKeyDisplay,
+                    togglePauseResume: togglePauseResume,
+                    maxSizeBytes: maxSizeBytes,
+                    outputURL: url,
+                    silence: silenceConfig,
+                    recorder: recorder
+                )
+
+                await MainActor.run { recorder.stop() }
+
+                // stdout: print ONLY the URL (pipeline-friendly)
+                if json {
+                    struct Output: Codable {
+                        let path: String
+                        let format: String
+                        let sampleRate: Double
+                        let channels: Int
+                        let bitRate: Int?
+                        let quality: String
+                        let duration: Double?
+                        let maxSizeMB: Double?
+                        let chunk: Int
+                        let stopReason: StopReason
+                    }
+
+                    let resolvedFormat = (format ?? .linearPCM)
+                    let out = Output(
+                        path: url.path,
+                        format: resolvedFormat.rawValue,
+                        sampleRate: sampleRate ?? 44_100,
+                        channels: channels ?? 1,
+                        bitRate: resolvedFormat == .linearPCM ? nil : (bitRate ?? 128_000),
+                        quality: (quality ?? .high).rawValue,
+                        duration: duration,
+                        maxSizeMB: maxSizeMB,
+                        chunk: chunkIndex,
+                        stopReason: stopReason
+                    )
+                    let data = try JSONEncoder().encode(out)
+                    FileHandle.standardOutput.write(data)
+                    FileHandle.standardOutput.write(Data("\n".utf8))
+                } else {
+                    print(url.path())
+                }
+
+                if stopReason == .split {
+                    chunkIndex += 1
+                    continue
+                }
+                break
             }
         } catch {
             log("Error: \(error)")

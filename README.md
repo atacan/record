@@ -19,14 +19,14 @@ The command prints the output file path to stdout. Status messages go to stderr 
 ## Usage
 
 ```bash
-recordit [--duration <seconds>] [--output <path>] [--name <pattern>] [--overwrite] [--json] [--list-devices] [--list-formats] [--list-qualities] [--device <device>] [--sample-rate <hz>] [--channels <count>] [--bit-rate <bps>] [--format <format>] [--quality <quality>]
+recordit [--duration <seconds>] [--output <path>] [--name <pattern>] [--overwrite] [--json] [--list-devices] [--list-formats] [--list-qualities] [--device <device>] [--stop-key <char>] [--pause-key <char>] [--resume-key <char>] [--silence-db <db>] [--silence-duration <seconds>] [--max-size <mb>] [--split <seconds>] [--sample-rate <hz>] [--channels <count>] [--bit-rate <bps>] [--format <format>] [--quality <quality>]
 ```
 
 ## Options
 
 - `--duration <seconds>`: Stop automatically after this many seconds. If omitted, press `S` to stop.
 - `--output <path>`: Write output to this file or directory. Default: temporary directory.
-- `--name <pattern>`: Filename pattern when output is a directory. Supports strftime tokens and `{uuid}`. Default: `micrec-%Y%m%d-%H%M%S`.
+- `--name <pattern>`: Filename pattern when output is a directory. Supports strftime tokens, `{uuid}`, and `{chunk}`. Default: `micrec-%Y%m%d-%H%M%S` (or `micrec-%Y%m%d-%H%M%S-{chunk}` when splitting).
 - `--overwrite`: Overwrite output file if it exists.
 - `--json`: Print machine-readable JSON to stdout.
 - `--list-devices`: List available input devices and exit.
@@ -39,6 +39,7 @@ recordit [--duration <seconds>] [--output <path>] [--name <pattern>] [--overwrit
 - `--silence-db <db>`: Silence threshold in dBFS (e.g. `-50`). Requires `--silence-duration`.
 - `--silence-duration <seconds>`: Stop after this many seconds of continuous silence. Requires `--silence-db`.
 - `--max-size <mb>`: Stop when output file reaches this size in MB.
+- `--split <seconds>`: Split recording into chunks of this many seconds. Output must be a directory.
 - `--sample-rate <hz>`: Sample rate in Hz. Default: `44100`.
 - `--channels <count>`: Number of channels. Default: `1`.
 - `--bit-rate <bps>`: Encoder bit rate in bps. Default: `128000`. Ignored for `linearPCM`.
@@ -64,6 +65,8 @@ recordit --pause-key p --resume-key r
 recordit --pause-key p --resume-key p
 recordit --silence-db -50 --silence-duration 3
 recordit --max-size 50
+recordit --split 30 --output /tmp
+recordit --split 10 --name "micrec-%Y%m%d-%H%M%S-{chunk}-{uuid}"
 recordit --output /tmp --name "micrec-%Y%m%d-%H%M%S-{uuid}"
 recordit --output /tmp/meeting.caf --overwrite
 recordit --duration 5 --json
@@ -75,3 +78,4 @@ recordit --format linearPCM --sample-rate 44100 --channels 1
 
 - Microphone permission is required. In macOS: System Settings -> Privacy & Security -> Microphone -> enable your terminal app.
 - Stopping with `S` requires a real TTY (Terminal/iTerm). IDE consoles may not deliver single-key input.
+- With `--split --json`, the tool prints one JSON object per chunk (NDJSON).

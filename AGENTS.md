@@ -45,6 +45,9 @@ swift build
   - `--pause-key` and `--resume-key` control pausing/resuming; if identical, the key toggles.
   - `--silence-db` + `--silence-duration` stops after continuous silence.
   - `--max-size` stops when the output file reaches a size in MB.
+- Split recording:
+  - `--split` writes multiple chunks; each chunk path is printed as it completes.
+  - Use `{chunk}` in `--name` to include the chunk index.
 
 ## Testing notes
 
