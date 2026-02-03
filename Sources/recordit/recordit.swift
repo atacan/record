@@ -222,6 +222,14 @@ final class AudioRecorder {
         recorder = nil
     }
 
+    func pause() {
+        recorder?.pause()
+    }
+
+    func resume() {
+        _ = recorder?.record()
+    }
+
     func setMeteringEnabled(_ enabled: Bool) {
         recorder?.isMeteringEnabled = enabled
     }
@@ -235,6 +243,10 @@ final class AudioRecorder {
 func waitForStopKeyOrDuration(
     _ duration: Double?,
     stopKeys: Set<UInt8>,
+    pauseKeys: Set<UInt8>,
+    resumeKeys: Set<UInt8>,
+    pauseKeyDisplay: String,
+    resumeKeyDisplay: String,
     silence: SilenceConfig?,
     recorder: AudioRecorder?
 ) async throws -> StopReason {
@@ -246,6 +258,7 @@ func waitForStopKeyOrDuration(
     var nextMeterCheck = Date()
     var silenceStart: Date?
     var buffer: UInt8 = 0
+    var isPaused = false
 
     while true {
         if Task.isCancelled {
@@ -257,7 +270,7 @@ func waitForStopKeyOrDuration(
             return .duration
         }
 
-        if let silence, let recorder, now >= nextMeterCheck {
+        if let silence, let recorder, !isPaused, now >= nextMeterCheck {
             let power = await MainActor.run { recorder.averagePower() }
             if Double(power) <= silence.db {
                 silenceStart = silenceStart ?? now
@@ -267,6 +280,9 @@ func waitForStopKeyOrDuration(
             } else {
                 silenceStart = nil
             }
+            nextMeterCheck = now.addingTimeInterval(meterInterval)
+        } else if isPaused {
+            silenceStart = nil
             nextMeterCheck = now.addingTimeInterval(meterInterval)
         }
 
@@ -283,8 +299,23 @@ func waitForStopKeyOrDuration(
         let ready = poll(&fds, 1, timeoutMs)
         if ready > 0 && (fds.revents & Int16(POLLIN)) != 0 {
             let count = read(STDIN_FILENO, &buffer, 1)
-            if count == 1, stopKeys.contains(buffer) {
-                return .key
+            if count == 1 {
+                if stopKeys.contains(buffer) {
+                    return .key
+                }
+                if pauseKeys.contains(buffer), !isPaused {
+                    if let recorder {
+                        await MainActor.run { recorder.pause() }
+                    }
+                    isPaused = true
+                    log("Paused. Press '\(resumeKeyDisplay)' to resume.")
+                } else if resumeKeys.contains(buffer), isPaused {
+                    if let recorder {
+                        await MainActor.run { recorder.resume() }
+                    }
+                    isPaused = false
+                    log("Resumed.")
+                }
             }
         }
     }
@@ -377,6 +408,12 @@ struct MicRec: AsyncParsableCommand {
     @Option(help: "Stop key (single ASCII character). Default: s.")
     var stopKey: String?
 
+    @Option(help: "Pause key (single ASCII character). Default: p.")
+    var pauseKey: String?
+
+    @Option(help: "Resume key (single ASCII character). Default: r.")
+    var resumeKey: String?
+
     @Option(help: "Silence threshold in dBFS (e.g. -50). Requires --silence-duration.")
     var silenceDB: Double?
 
@@ -402,12 +439,21 @@ struct MicRec: AsyncParsableCommand {
         if let duration, duration <= 0 {
             throw ValidationError("Duration must be greater than 0 seconds.")
         }
-        if let stopKey {
-            guard stopKey.count == 1,
-                  let scalar = stopKey.unicodeScalars.first,
-                  scalar.isASCII else {
-                throw ValidationError("Stop key must be a single ASCII character.")
-            }
+        let stopKeyValue = stopKey ?? "s"
+        let pauseKeyValue = pauseKey ?? "p"
+        let resumeKeyValue = resumeKey ?? "r"
+        let stopSet = try resolveKeySet(stopKeyValue, label: "Stop key")
+        let pauseSet = try resolveKeySet(pauseKeyValue, label: "Pause key")
+        let resumeSet = try resolveKeySet(resumeKeyValue, label: "Resume key")
+
+        if !stopSet.isDisjoint(with: pauseSet) {
+            throw ValidationError("Stop key and pause key must be different.")
+        }
+        if !stopSet.isDisjoint(with: resumeSet) {
+            throw ValidationError("Stop key and resume key must be different.")
+        }
+        if !pauseSet.isDisjoint(with: resumeSet) {
+            throw ValidationError("Pause key and resume key must be different.")
         }
         if (silenceDB == nil) != (silenceDuration == nil) {
             throw ValidationError("Both --silence-db and --silence-duration must be provided together.")
@@ -509,18 +555,17 @@ struct MicRec: AsyncParsableCommand {
         return tempDir.appendingPathComponent(ensureExtension(filename))
     }
 
-    func resolveStopKeys() throws -> Set<UInt8> {
-        let key = stopKey ?? "s"
+    func resolveKeySet(_ key: String, label: String) throws -> Set<UInt8> {
         guard key.count == 1, let scalar = key.unicodeScalars.first, scalar.isASCII else {
-            throw ValidationError("Stop key must be a single ASCII character.")
+            throw ValidationError("\(label) must be a single ASCII character.")
         }
 
         var keys: Set<UInt8> = [UInt8(scalar.value)]
         if scalar.properties.isAlphabetic {
-            if let upper = String(key).uppercased().unicodeScalars.first {
+            if let upper = key.uppercased().unicodeScalars.first {
                 keys.insert(UInt8(upper.value))
             }
-            if let lower = String(key).lowercased().unicodeScalars.first {
+            if let lower = key.lowercased().unicodeScalars.first {
                 keys.insert(UInt8(lower.value))
             }
         }
@@ -628,7 +673,15 @@ struct MicRec: AsyncParsableCommand {
                 }
             }
 
-            let stopKeys = try resolveStopKeys()
+            let stopKeyValue = stopKey ?? "s"
+            let pauseKeyValue = pauseKey ?? "p"
+            let resumeKeyValue = resumeKey ?? "r"
+            let stopKeys = try resolveKeySet(stopKeyValue, label: "Stop key")
+            let pauseKeys = try resolveKeySet(pauseKeyValue, label: "Pause key")
+            let resumeKeys = try resolveKeySet(resumeKeyValue, label: "Resume key")
+            let stopKeyDisplay = stopKeyValue.uppercased()
+            let pauseKeyDisplay = pauseKeyValue.uppercased()
+            let resumeKeyDisplay = resumeKeyValue.uppercased()
             let silenceConfig: SilenceConfig?
             if let silenceDB, let silenceDuration {
                 silenceConfig = SilenceConfig(db: silenceDB, duration: silenceDuration)
@@ -650,8 +703,10 @@ struct MicRec: AsyncParsableCommand {
                 await MainActor.run { recorder.setMeteringEnabled(true) }
             }
 
-            let stopKeyDisplay = String((stopKey ?? "s").uppercased())
             var stopMessage = "press '\(stopKeyDisplay)' to stop"
+            if pauseKeyValue != stopKeyValue && resumeKeyValue != stopKeyValue {
+                stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
+            }
             if let silenceConfig {
                 stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
             }
@@ -664,6 +719,10 @@ struct MicRec: AsyncParsableCommand {
             let stopReason = try await waitForStopKeyOrDuration(
                 duration,
                 stopKeys: stopKeys,
+                pauseKeys: pauseKeys,
+                resumeKeys: resumeKeys,
+                pauseKeyDisplay: pauseKeyDisplay,
+                resumeKeyDisplay: resumeKeyDisplay,
                 silence: silenceConfig,
                 recorder: recorder
             )

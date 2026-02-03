@@ -34,6 +34,8 @@ recordit [--duration <seconds>] [--output <path>] [--name <pattern>] [--overwrit
 - `--list-qualities`: List available encoder qualities and exit.
 - `--device <device>`: Input device UID or name to use for recording.
 - `--stop-key <char>`: Stop key (single ASCII character). Default: `s` (case-insensitive).
+- `--pause-key <char>`: Pause key (single ASCII character). Default: `p` (case-insensitive).
+- `--resume-key <char>`: Resume key (single ASCII character). Default: `r` (case-insensitive).
 - `--silence-db <db>`: Silence threshold in dBFS (e.g. `-50`). Requires `--silence-duration`.
 - `--silence-duration <seconds>`: Stop after this many seconds of continuous silence. Requires `--silence-db`.
 - `--sample-rate <hz>`: Sample rate in Hz. Default: `44100`.
@@ -57,6 +59,7 @@ recordit --list-devices
 recordit --list-formats --json
 recordit --device "MacBook Pro Microphone" --duration 10
 recordit --stop-key q --duration 30
+recordit --pause-key p --resume-key r
 recordit --silence-db -50 --silence-duration 3
 recordit --output /tmp --name "micrec-%Y%m%d-%H%M%S-{uuid}"
 recordit --output /tmp/meeting.caf --overwrite
