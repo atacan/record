@@ -806,6 +806,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
     private let queue = DispatchQueue(label: "recordit.screen.capture")
     private let stateLock = NSLock()
     private var paused = false
+    private var pauseStartTime: CMTime?
+    private var pauseOffset = CMTime.zero
     private let outputURL: URL
     private let fileType: AVFileType
     private let videoCodec: AVVideoCodecType
@@ -865,10 +867,18 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen || type == .audio else { return }
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
-        if isPaused() { return }
+        let pauseState = pauseSnapshot()
+        if pauseState.paused { return }
+
+        var adjustedBuffer = sampleBuffer
+        if pauseState.offset.isValid, CMTimeCompare(pauseState.offset, .zero) == 1 {
+            if let shifted = adjustSampleBuffer(sampleBuffer, by: pauseState.offset) {
+                adjustedBuffer = shifted
+            }
+        }
 
         if type == .screen {
-            if !ensureWriter(sampleBuffer: sampleBuffer) {
+            if !ensureWriter(sampleBuffer: adjustedBuffer) {
                 return
             }
         }
@@ -883,13 +893,13 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
 
         if type == .screen {
             if input.isReadyForMoreMediaData {
-                if !input.append(sampleBuffer) {
+                if !input.append(adjustedBuffer) {
                     log("Failed to append video buffer: \(writer.error?.localizedDescription ?? "unknown error")")
                 }
             }
         } else if type == .audio, let audioInput, writer.status != .unknown {
             if audioInput.isReadyForMoreMediaData {
-                if !audioInput.append(sampleBuffer) {
+                if !audioInput.append(adjustedBuffer) {
                     log("Failed to append audio buffer: \(writer.error?.localizedDescription ?? "unknown error")")
                 }
             }
@@ -898,15 +908,33 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
 
     func setPaused(_ paused: Bool) {
         stateLock.lock()
-        self.paused = paused
+        if paused {
+            if !self.paused {
+                self.paused = true
+                pauseStartTime = CMClockGetTime(CMClockGetHostTimeClock())
+            }
+        } else {
+            if self.paused {
+                self.paused = false
+                if let pauseStartTime {
+                    let now = CMClockGetTime(CMClockGetHostTimeClock())
+                    let delta = CMTimeSubtract(now, pauseStartTime)
+                    if delta.isValid, CMTimeCompare(delta, .zero) == 1 {
+                        pauseOffset = CMTimeAdd(pauseOffset, delta)
+                    }
+                }
+                pauseStartTime = nil
+            }
+        }
         stateLock.unlock()
     }
 
-    private func isPaused() -> Bool {
+    private func pauseSnapshot() -> (paused: Bool, offset: CMTime) {
         stateLock.lock()
         let value = paused
+        let offset = pauseOffset
         stateLock.unlock()
-        return value
+        return (value, offset)
     }
 
     private func accessWriter<T>(_ block: () -> T) -> T {
@@ -973,5 +1001,52 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         }
 
         return true
+    }
+
+    private func adjustSampleBuffer(_ sampleBuffer: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        var timingCount = 0
+        var status = CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        )
+        guard status == noErr, timingCount > 0 else {
+            return sampleBuffer
+        }
+
+        var timing = [CMSampleTimingInfo](
+            repeating: CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid),
+            count: timingCount
+        )
+        status = CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: timingCount,
+            arrayToFill: &timing,
+            entriesNeededOut: &timingCount
+        )
+        guard status == noErr else {
+            return sampleBuffer
+        }
+
+        for index in 0..<timingCount {
+            timing[index].presentationTimeStamp = CMTimeSubtract(timing[index].presentationTimeStamp, offset)
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeSubtract(timing[index].decodeTimeStamp, offset)
+            }
+        }
+
+        var adjusted: CMSampleBuffer?
+        status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sampleBuffer,
+            sampleTimingEntryCount: timingCount,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &adjusted
+        )
+        guard status == noErr else {
+            return sampleBuffer
+        }
+        return adjusted
     }
 }
