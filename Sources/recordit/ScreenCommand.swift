@@ -2,8 +2,11 @@ import ArgumentParser
 import AVFoundation
 import VideoToolbox
 import CoreMedia
+import CoreImage
 import Foundation
 import ScreenCaptureKit
+import ImageIO
+import UniformTypeIdentifiers
 import Darwin
 
 struct ScreenCommand: AsyncParsableCommand {
@@ -41,6 +44,45 @@ struct ScreenCommand: AsyncParsableCommand {
         case both
     }
 
+    enum ScreenshotFormat {
+        case png
+        case jpeg
+        case heic
+
+        var name: String {
+            switch self {
+            case .png: return "png"
+            case .jpeg: return "jpeg"
+            case .heic: return "heic"
+            }
+        }
+
+        var fileExtension: String {
+            switch self {
+            case .png: return "png"
+            case .jpeg: return "jpg"
+            case .heic: return "heic"
+            }
+        }
+
+        var utType: CFString {
+            switch self {
+            case .png: return UTType.png.identifier as CFString
+            case .jpeg: return UTType.jpeg.identifier as CFString
+            case .heic: return UTType.heic.identifier as CFString
+            }
+        }
+
+        static func fromExtension(_ value: String) -> ScreenshotFormat? {
+            switch value.lowercased() {
+            case "png": return .png
+            case "jpg", "jpeg": return .jpeg
+            case "heic": return .heic
+            default: return nil
+            }
+        }
+    }
+
     @Option(help: "Stop recording after this many seconds. If omitted, press Ctrl-C to stop.")
     var duration: Double?
 
@@ -61,6 +103,9 @@ struct ScreenCommand: AsyncParsableCommand {
 
     @Flag(help: "Print machine-readable JSON to stdout.")
     var json = false
+
+    @Flag(help: "Capture a single screenshot instead of a video recording.")
+    var screenshot = false
 
     @Option(help: "Display ID to record, or 'primary'.")
     var display: String?
@@ -235,49 +280,56 @@ struct ScreenCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
-        let stopKeyValue = stopKey ?? "s"
-        let pauseKeyValue = pauseKey ?? "p"
-        let resumeKeyValue = resumeKey ?? "r"
-        let togglePauseResume = pauseKeyValue.caseInsensitiveCompare(resumeKeyValue) == .orderedSame
-        let stopKeys = try resolveKeySet(stopKeyValue, label: "Stop key")
-        let pauseKeys = try resolveKeySet(pauseKeyValue, label: "Pause key")
-        let resumeKeys = try resolveKeySet(resumeKeyValue, label: "Resume key")
-        let stopKeyDisplay = stopKeyValue.uppercased()
-        let pauseKeyDisplay = pauseKeyValue.uppercased()
-        let resumeKeyDisplay = resumeKeyValue.uppercased()
-
-        if !stopKeys.isDisjoint(with: pauseKeys) {
-            throw ValidationError("Stop key and pause key must be different.")
-        }
-        if !stopKeys.isDisjoint(with: resumeKeys) {
-            throw ValidationError("Stop key and resume key must be different.")
-        }
-        if !togglePauseResume, !pauseKeys.isDisjoint(with: resumeKeys) {
-            throw ValidationError("Pause key and resume key must be different unless you want a toggle.")
-        }
-        if let duration, duration <= 0 {
-            throw ValidationError("Duration must be greater than 0 seconds.")
-        }
-        if let split, split <= 0 {
-            throw ValidationError("Split duration must be greater than 0 seconds.")
-        }
-        if let maxSizeMB, maxSizeMB <= 0 {
-            throw ValidationError("Max size must be greater than 0 MB.")
-        }
-        if let fps, fps <= 0 {
-            throw ValidationError("FPS must be greater than 0.")
-        }
-        if let scale, scale <= 0 {
-            throw ValidationError("Scale must be greater than 0.")
-        }
-        if let bitRate, bitRate <= 0 {
-            throw ValidationError("Bit rate must be greater than 0.")
-        }
-        if let audioSampleRate, audioSampleRate <= 0 {
-            throw ValidationError("Audio sample rate must be greater than 0.")
-        }
-        if let audioChannels, audioChannels <= 0 {
-            throw ValidationError("Audio channels must be greater than 0.")
+        if screenshot {
+            if duration != nil {
+                throw ValidationError("--duration is only supported for video recording.")
+            }
+            if split != nil {
+                throw ValidationError("--split is only supported for video recording.")
+            }
+            if maxSizeMB != nil {
+                throw ValidationError("--max-size is only supported for video recording.")
+            }
+            if stopKey != nil || pauseKey != nil || resumeKey != nil {
+                throw ValidationError("Stop/pause/resume keys are only supported for video recording.")
+            }
+            if fps != nil {
+                throw ValidationError("--fps is only supported for video recording.")
+            }
+            if codec != nil {
+                throw ValidationError("--codec is only supported for video recording.")
+            }
+            if bitRate != nil {
+                throw ValidationError("--bit-rate is only supported for video recording.")
+            }
+            if audio != nil || audioSampleRate != nil || audioChannels != nil {
+                throw ValidationError("Audio capture options are only supported for video recording.")
+            }
+        } else {
+            if let duration, duration <= 0 {
+                throw ValidationError("Duration must be greater than 0 seconds.")
+            }
+            if let split, split <= 0 {
+                throw ValidationError("Split duration must be greater than 0 seconds.")
+            }
+            if let maxSizeMB, maxSizeMB <= 0 {
+                throw ValidationError("Max size must be greater than 0 MB.")
+            }
+            if let fps, fps <= 0 {
+                throw ValidationError("FPS must be greater than 0.")
+            }
+            if let scale, scale <= 0 {
+                throw ValidationError("Scale must be greater than 0.")
+            }
+            if let bitRate, bitRate <= 0 {
+                throw ValidationError("Bit rate must be greater than 0.")
+            }
+            if let audioSampleRate, audioSampleRate <= 0 {
+                throw ValidationError("Audio sample rate must be greater than 0.")
+            }
+            if let audioChannels, audioChannels <= 0 {
+                throw ValidationError("Audio channels must be greater than 0.")
+            }
         }
 
         let maxSizeBytes = maxSizeMB.map { Int64($0 * 1_048_576) }
@@ -311,7 +363,7 @@ struct ScreenCommand: AsyncParsableCommand {
             height: regionPointsSize.height * pointScale
         )
         var targetPixelSize = scaledSize(base: regionPixelSize, scale: scale ?? 1.0)
-        if videoCodec == .h264 {
+        if !screenshot && videoCodec == .h264 {
             let maxDimension = max(targetPixelSize.width, targetPixelSize.height)
             if maxDimension > 4096 {
                 let factor = 4096.0 / maxDimension
@@ -348,36 +400,107 @@ struct ScreenCommand: AsyncParsableCommand {
         let audioChannelsValue = audioChannels ?? 2
         var captureAudio = false
         var audioSettings: [String: Any]?
+        let effectiveAudioMode: ScreenAudio
 
-        if audioMode != .none {
-            if audioMode == .system || audioMode == .both {
-                config.capturesAudio = true
-                captureAudio = true
-            }
-            if audioMode == .mic || audioMode == .both {
-                if #available(macOS 15.0, *) {
-                    config.captureMicrophone = true
+        if screenshot {
+            effectiveAudioMode = .none
+        } else {
+            if audioMode != .none {
+                if audioMode == .system || audioMode == .both {
+                    config.capturesAudio = true
                     captureAudio = true
+                }
+                if audioMode == .mic || audioMode == .both {
+                    if #available(macOS 15.0, *) {
+                        config.captureMicrophone = true
+                        captureAudio = true
+                    } else {
+                        log("Microphone capture requires macOS 15 or later; ignoring mic audio.")
+                    }
+                }
+                config.sampleRate = audioSampleRateValue
+                config.channelCount = audioChannelsValue
+                audioSettings = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: audioSampleRateValue,
+                    AVNumberOfChannelsKey: audioChannelsValue,
+                    AVEncoderBitRateKey: 128_000
+                ]
+            }
+            effectiveAudioMode = captureAudio ? audioMode : .none
+        }
+
+        if screenshot {
+            let outputURL = try resolveOutputURL(
+                output: output,
+                name: name,
+                fileExtension: ScreenshotFormat.png.fileExtension,
+                chunkIndex: nil,
+                requireDirectory: false,
+                prefix: "recordit-screenshot"
+            )
+
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                if overwrite {
+                    try FileManager.default.removeItem(at: outputURL)
                 } else {
-                    log("Microphone capture requires macOS 15 or later; ignoring mic audio.")
+                    throw ValidationError("Output file already exists. Use --overwrite to replace it.")
                 }
             }
-            config.sampleRate = audioSampleRateValue
-            config.channelCount = audioChannelsValue
-            audioSettings = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: audioSampleRateValue,
-                AVNumberOfChannelsKey: audioChannelsValue,
-                AVEncoderBitRateKey: 128_000
-            ]
+
+            let format = try resolveScreenshotFormat(from: outputURL)
+            let capturer = try ScreenShotCapturer(filter: filter, configuration: config)
+            let image = try await capturer.capture()
+            try writeScreenshotImage(image, to: outputURL, format: format)
+
+            if json {
+                struct Output: Codable {
+                    let path: String
+                    let format: String
+                    let width: Int
+                    let height: Int
+                }
+                let out = Output(
+                    path: outputURL.path,
+                    format: format.name,
+                    width: image.width,
+                    height: image.height
+                )
+                let data = try JSONEncoder().encode(out)
+                FileHandle.standardOutput.write(data)
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            } else {
+                print(outputURL.path())
+            }
+            return
         }
-        let effectiveAudioMode: ScreenAudio = captureAudio ? audioMode : .none
 
         var compression: [String: Any] = [
             kVTCompressionPropertyKey_RealTime as String: true
         ]
         if let bitRate, videoCodec != .prores {
             compression[AVVideoAverageBitRateKey] = bitRate
+        }
+
+        let stopKeyValue = stopKey ?? "s"
+        let pauseKeyValue = pauseKey ?? "p"
+        let resumeKeyValue = resumeKey ?? "r"
+        let togglePauseResume = pauseKeyValue.caseInsensitiveCompare(resumeKeyValue) == .orderedSame
+        let stopKeys = try resolveKeySet(stopKeyValue, label: "Stop key")
+        let pauseKeys = try resolveKeySet(pauseKeyValue, label: "Pause key")
+        let resumeKeys = try resolveKeySet(resumeKeyValue, label: "Resume key")
+        let stopKeyDisplay = stopKeyValue.uppercased()
+        let pauseKeyDisplay = pauseKeyValue.uppercased()
+        let resumeKeyDisplay = resumeKeyValue.uppercased()
+
+        if !stopKeys.isDisjoint(with: pauseKeys) {
+            throw ValidationError("Stop key and pause key must be different.")
+        }
+        if !stopKeys.isDisjoint(with: resumeKeys) {
+            throw ValidationError("Stop key and resume key must be different.")
+        }
+        if !togglePauseResume, !pauseKeys.isDisjoint(with: resumeKeys) {
+            throw ValidationError("Pause key and resume key must be different unless you want a toggle.")
         }
 
         let shouldSplit = split != nil
@@ -618,7 +741,7 @@ private func resolveKeySet(_ key: String, label: String) throws -> Set<UInt8> {
     return keys
 }
 
-private func formatFilename(pattern: String, date: Date, uuid: UUID, chunkIndex: Int?) -> String {
+private func formatFilename(pattern: String, date: Date, uuid: UUID, chunkIndex: Int?, prefix: String) -> String {
     var t = time_t(date.timeIntervalSince1970)
     var tm = tm()
     localtime_r(&t, &tm)
@@ -626,11 +749,11 @@ private func formatFilename(pattern: String, date: Date, uuid: UUID, chunkIndex:
     var buffer = [CChar](repeating: 0, count: 256)
     let count = strftime(&buffer, buffer.count, pattern, &tm)
     if count == 0 {
-        return "recordit-screen-\(uuid.uuidString)"
+        return "\(prefix)-\(uuid.uuidString)"
     }
 
     let bytes = buffer.prefix(count).map { UInt8(bitPattern: $0) }
-    let base = String(bytes: bytes, encoding: .utf8) ?? "recordit-screen-\(uuid.uuidString)"
+    let base = String(bytes: bytes, encoding: .utf8) ?? "\(prefix)-\(uuid.uuidString)"
     var result = base.replacingOccurrences(of: "{uuid}", with: uuid.uuidString)
     if let chunkIndex {
         result = result.replacingOccurrences(of: "{chunk}", with: String(chunkIndex))
@@ -643,11 +766,12 @@ private func resolveOutputURL(
     name: String?,
     fileExtension: String,
     chunkIndex: Int?,
-    requireDirectory: Bool
+    requireDirectory: Bool,
+    prefix: String = "recordit-screen"
 ) throws -> URL {
     let fileManager = FileManager.default
     let uuid = UUID()
-    let defaultPattern = (chunkIndex == nil) ? "recordit-screen-%Y%m%d-%H%M%S" : "recordit-screen-%Y%m%d-%H%M%S-{chunk}"
+    let defaultPattern = (chunkIndex == nil) ? "\(prefix)-%Y%m%d-%H%M%S" : "\(prefix)-%Y%m%d-%H%M%S-{chunk}"
     let pattern = name ?? defaultPattern
 
     func ensureExtension(_ filename: String) -> String {
@@ -663,7 +787,7 @@ private func resolveOutputURL(
         var isDirectory: ObjCBool = false
         if fileManager.fileExists(atPath: outputURL.path, isDirectory: &isDirectory) {
             if isDirectory.boolValue {
-                let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
+                let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex, prefix: prefix)
                 return outputURL.appendingPathComponent(ensureExtension(filename))
             }
             if requireDirectory {
@@ -674,7 +798,7 @@ private func resolveOutputURL(
 
         if output.hasSuffix("/") {
             try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
-            let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
+            let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex, prefix: prefix)
             return outputURL.appendingPathComponent(ensureExtension(filename))
         }
 
@@ -683,7 +807,7 @@ private func resolveOutputURL(
                 throw ValidationError("Output must be a directory when using --split.")
             }
             try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
-            let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
+            let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex, prefix: prefix)
             return outputURL.appendingPathComponent(ensureExtension(filename))
         }
 
@@ -693,9 +817,100 @@ private func resolveOutputURL(
         return outputURL
     }
 
-    let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex)
+    let filename = formatFilename(pattern: pattern, date: Date(), uuid: uuid, chunkIndex: chunkIndex, prefix: prefix)
     let tempDir = fileManager.temporaryDirectory
     return tempDir.appendingPathComponent(ensureExtension(filename))
+}
+
+private func resolveScreenshotFormat(from url: URL) throws -> ScreenCommand.ScreenshotFormat {
+    let ext = url.pathExtension.lowercased()
+    let format = ext.isEmpty ? .png : ScreenCommand.ScreenshotFormat.fromExtension(ext)
+    guard let resolved = format else {
+        throw ValidationError("Unsupported screenshot format '.\(ext)'. Use png, jpg, jpeg, or heic.")
+    }
+    if resolved == .heic, !heicEncodingSupported() {
+        throw ValidationError("HEIC encoding is not supported on this system.")
+    }
+    return resolved
+}
+
+private func heicEncodingSupported() -> Bool {
+    if #available(macOS 11.0, *) {
+        if let types = CGImageDestinationCopyTypeIdentifiers() as? [CFString] {
+            return types.contains(UTType.heic.identifier as CFString)
+        }
+    }
+    return false
+}
+
+private func writeScreenshotImage(
+    _ image: CGImage,
+    to url: URL,
+    format: ScreenCommand.ScreenshotFormat
+) throws {
+    guard let destination = CGImageDestinationCreateWithURL(url as CFURL, format.utType, 1, nil) else {
+        throw ValidationError("Unable to create image destination.")
+    }
+
+    var options: [CFString: Any] = [:]
+    if format == .jpeg {
+        options[kCGImageDestinationLossyCompressionQuality] = 0.9
+    }
+    CGImageDestinationAddImage(destination, image, options as CFDictionary)
+    if !CGImageDestinationFinalize(destination) {
+        throw ValidationError("Unable to write screenshot.")
+    }
+}
+
+private final class ScreenShotCapturer: NSObject, SCStreamOutput {
+    private let stream: SCStream
+    private let queue = DispatchQueue(label: "recordit.screen.screenshot")
+    private let ciContext = CIContext()
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<CGImage, Error>?
+    private var didCapture = false
+
+    init(filter: SCContentFilter, configuration: SCStreamConfiguration) throws {
+        stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+        super.init()
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+    }
+
+    func capture() async throws -> CGImage {
+        try await stream.startCapture()
+        let image = try await withCheckedThrowingContinuation { cont in
+            lock.lock()
+            continuation = cont
+            lock.unlock()
+        }
+        try await stream.stopCapture()
+        return image
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen else { return }
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            return
+        }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            return
+        }
+
+        lock.lock()
+        if didCapture {
+            lock.unlock()
+            return
+        }
+        didCapture = true
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+
+        cont?.resume(returning: cgImage)
+    }
 }
 
 private func waitForStopKeyOrDuration(

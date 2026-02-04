@@ -83,6 +83,7 @@ File extension mapping:
 - `--audio <none|system|mic|both>`: Capture system and/or mic audio. Default: `none`.
 - `--audio-sample-rate <hz>`: Audio sample rate. Default: `48000`.
 - `--audio-channels <count>`: Audio channel count. Default: `2`.
+- `--screenshot`: Capture a single screenshot instead of a video recording. Image format is inferred from the output extension or defaults to `png`.
 
 ## Camera Options
 
@@ -142,6 +143,9 @@ recordit screen --split 30 --output /tmp
 recordit screen --codec hevc --bit-rate 6000000 --scale 0.5
 recordit screen --audio system
 recordit screen --audio both --audio-sample-rate 48000 --audio-channels 2
+recordit screen --screenshot
+recordit screen --screenshot --window "Safari" --region 10%,10%,80%,80%
+recordit screen --screenshot --output /tmp/screen.jpg --overwrite
 ```
 
 Camera:
