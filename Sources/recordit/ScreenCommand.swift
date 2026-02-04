@@ -798,6 +798,7 @@ private func waitForStopKeyOrDuration(
 }
 
 final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
+    private static let queueKey = DispatchSpecificKey<UInt8>()
     private let stream: SCStream
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
@@ -822,6 +823,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         audioSettings: [String: Any]?,
         captureAudio: Bool
     ) throws {
+        queue.setSpecific(key: Self.queueKey, value: 1)
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         self.outputURL = outputURL
         self.fileType = fileType
@@ -844,7 +846,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
 
     func stop() async throws {
         try await stream.stopCapture()
-        let (writer, input, audioInput) = queue.sync { (self.writer, self.input, self.audioInput) }
+        let (writer, input, audioInput) = accessWriter { (self.writer, self.input, self.audioInput) }
 
         guard let writer, let input else { return }
         input.markAsFinished()
@@ -871,7 +873,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
             }
         }
 
-        let (writer, input, audioInput) = queue.sync { (self.writer, self.input, self.audioInput) }
+        let (writer, input, audioInput) = accessWriter { (self.writer, self.input, self.audioInput) }
         guard let writer, let input else { return }
 
         if writer.status == .failed {
@@ -905,6 +907,13 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         let value = paused
         stateLock.unlock()
         return value
+    }
+
+    private func accessWriter<T>(_ block: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return block()
+        }
+        return queue.sync(execute: block)
     }
 
     private func ensureWriter(sampleBuffer: CMSampleBuffer) -> Bool {
