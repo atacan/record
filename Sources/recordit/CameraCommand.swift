@@ -685,9 +685,7 @@ private final class CameraPhotoCapturer: NSObject, AVCaptureVideoDataOutputSampl
     private let device: AVCaptureDevice
     private let queue = DispatchQueue(label: "recordit.camera.photo")
     private let ciContext = CIContext()
-    private var continuation: CheckedContinuation<CGImage, Error>?
-    private let continuationLock = NSLock()
-    private var frameCountdown = 0
+    private let state = PhotoCaptureState()
 
     init(device: AVCaptureDevice, resolution: CMVideoDimensions?) throws {
         session = AVCaptureSession()
@@ -731,34 +729,22 @@ private final class CameraPhotoCapturer: NSObject, AVCaptureVideoDataOutputSampl
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        continuationLock.lock()
-        let continuation = self.continuation
-        if continuation == nil {
-            continuationLock.unlock()
-            return
-        }
-        if frameCountdown > 0 {
-            frameCountdown -= 1
-            continuationLock.unlock()
-            return
-        }
-        continuationLock.unlock()
-
         guard CMSampleBufferDataIsReady(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             return
         }
 
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+        guard let continuation = state.consumeFrameIfReady() else {
             return
         }
 
-        continuationLock.lock()
-        let cont = self.continuation
-        self.continuation = nil
-        continuationLock.unlock()
-        cont?.resume(returning: cgImage)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            continuation.resume(throwing: ValidationError("Unable to encode photo."))
+            return
+        }
+
+        continuation.resume(returning: cgImage)
     }
 
     private func warmUpIfNeeded() async throws {
@@ -778,18 +764,11 @@ private final class CameraPhotoCapturer: NSObject, AVCaptureVideoDataOutputSampl
 
     private func awaitFrame(timeout: TimeInterval) async throws -> CGImage {
         try await withCheckedThrowingContinuation { cont in
-            continuationLock.lock()
-            continuation = cont
-            frameCountdown = 5
-            continuationLock.unlock()
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-                guard let self else { return }
-                self.continuationLock.lock()
-                let continuation = self.continuation
-                self.continuation = nil
-                self.continuationLock.unlock()
-                continuation?.resume(throwing: ValidationError("Timed out waiting for a camera frame."))
+            state.beginCapture(cont, skipFrames: 5)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [state] in
+                if let continuation = state.takeForTimeout() {
+                    continuation.resume(throwing: ValidationError("Timed out waiting for a camera frame."))
+                }
             }
         }
     }
@@ -819,6 +798,47 @@ private final class CameraPhotoCapturer: NSObject, AVCaptureVideoDataOutputSampl
         if !CGImageDestinationFinalize(destination) {
             throw ValidationError("Unable to write photo.")
         }
+    }
+}
+
+private final class PhotoCaptureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<CGImage, Error>?
+    private var frameCountdown = 0
+    private var didCapture = false
+
+    func beginCapture(_ continuation: CheckedContinuation<CGImage, Error>, skipFrames: Int) {
+        lock.lock()
+        self.continuation = continuation
+        frameCountdown = max(0, skipFrames)
+        didCapture = false
+        lock.unlock()
+    }
+
+    func consumeFrameIfReady() -> CheckedContinuation<CGImage, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let continuation, !didCapture else {
+            return nil
+        }
+        if frameCountdown > 0 {
+            frameCountdown -= 1
+            return nil
+        }
+        didCapture = true
+        self.continuation = nil
+        return continuation
+    }
+
+    func takeForTimeout() -> CheckedContinuation<CGImage, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let continuation, !didCapture else {
+            return nil
+        }
+        didCapture = true
+        self.continuation = nil
+        return continuation
     }
 }
 

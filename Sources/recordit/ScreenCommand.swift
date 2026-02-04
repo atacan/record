@@ -1069,8 +1069,9 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         input.markAsFinished()
         audioInput?.markAsFinished()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            writer.finishWriting {
-                if let error = writer.error {
+            writer.finishWriting { [self] in
+                let error = accessWriter { self.writer?.error }
+                if let error {
                     cont.resume(throwing: error)
                 } else {
                     cont.resume(returning: ())
