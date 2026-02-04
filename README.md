@@ -1,6 +1,6 @@
 # recordit
 
-A macOS CLI that records audio or screen output and prints the output file path.
+A macOS CLI that records audio, screen, or camera output and prints the output file path.
 
 ## Build
 
@@ -13,6 +13,7 @@ swift build
 ```bash
 .build/arm64-apple-macosx/debug/recordit audio
 .build/arm64-apple-macosx/debug/recordit screen
+.build/arm64-apple-macosx/debug/recordit camera
 ```
 
 The command prints the output file path to stdout. Status messages go to stderr so the output is pipeline-friendly.
@@ -22,6 +23,7 @@ The command prints the output file path to stdout. Status messages go to stderr 
 ```bash
 recordit audio [options]
 recordit screen [options]
+recordit camera [options]
 ```
 
 ## Audio Options
@@ -82,6 +84,25 @@ File extension mapping:
 - `--audio-sample-rate <hz>`: Audio sample rate. Default: `48000`.
 - `--audio-channels <count>`: Audio channel count. Default: `2`.
 
+## Camera Options
+
+- `--list-cameras`: List available cameras and exit.
+- `--camera <id|name>`: Camera ID or name substring to use for capture.
+- `--mode <video|photo>`: Capture mode. Default: `video`.
+- `--photo`: Capture a single photo (alias for `--mode photo`).
+- `--duration <seconds>`: Stop recording after this many seconds. If omitted, press the stop key (video only).
+- `--output <path>`: Write output to this file or directory. Default: temporary directory.
+- `--name <pattern>`: Filename pattern when output is a directory. Supports strftime tokens, `{uuid}`, and `{chunk}`.
+- `--overwrite`: Overwrite output file if it exists.
+- `--json`: Print machine-readable JSON to stdout.
+- `--stop-key <char>`: Stop key (single ASCII character). Default: `s` (case-insensitive).
+- `--max-size <mb>`: Stop when output file reaches this size in MB (video only).
+- `--split <seconds>`: Split recording into chunks of this many seconds. Output must be a directory (video only).
+- `--fps <fps>`: Frames per second (video only).
+- `--resolution <WxH>`: Capture resolution (e.g. `1280x720`).
+- `--audio`: Record from the system default microphone (video only).
+- `--photo-format <jpeg|heic>`: Photo format. Default: `jpeg` (photo only).
+
 Region examples:
 - `--region 0.1,0.1,0.8,0.8` (fractions)
 - `--region 10%,10%,80%,80%` (percentages)
@@ -123,10 +144,24 @@ recordit screen --audio system
 recordit screen --audio both --audio-sample-rate 48000 --audio-channels 2
 ```
 
+Camera:
+```bash
+recordit camera --duration 5
+recordit camera --list-cameras
+recordit camera --camera "FaceTime" --duration 10
+recordit camera --photo
+recordit camera --photo --photo-format heic
+recordit camera --resolution 1280x720 --fps 30
+recordit camera --split 30 --output /tmp
+recordit camera --audio --duration 5
+```
+
 ## Notes
 
 - Microphone permission is required for audio recording. In macOS: System Settings -> Privacy & Security -> Microphone -> enable your terminal app.
 - Screen recording permission is required for screen capture. In macOS: System Settings -> Privacy & Security -> Screen Recording -> enable your terminal app.
+- Camera permission is required for camera capture. In macOS: System Settings -> Privacy & Security -> Camera -> enable your terminal app.
+- Microphone permission is required for camera capture when using `--audio`.
 - Stopping with `S` requires a real TTY (Terminal/iTerm). IDE consoles may not deliver single-key input.
 - With `--split --json`, the tool prints one JSON object per chunk (NDJSON).
 - While paused, split timing does not advance.
