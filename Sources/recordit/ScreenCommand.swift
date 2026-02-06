@@ -587,6 +587,7 @@ struct ScreenCommand: AsyncParsableCommand {
                 remainingDuration,
                 splitDuration: split,
                 stopKeys: stopKeys,
+                stopKeyDisplay: stopKeyDisplay,
                 pauseKeys: pauseKeys,
                 resumeKeys: resumeKeys,
                 pauseKeyDisplay: pauseKeyDisplay,
@@ -1010,6 +1011,7 @@ private func waitForStopKeyOrDuration(
     _ duration: Double?,
     splitDuration: Double?,
     stopKeys: Set<UInt8>,
+    stopKeyDisplay: String,
     pauseKeys: Set<UInt8>,
     resumeKeys: Set<UInt8>,
     pauseKeyDisplay: String,
@@ -1031,6 +1033,7 @@ private func waitForStopKeyOrDuration(
     var buffer: UInt8 = 0
     var isPaused = false
     var lastTick = Date()
+    var recordedDuration: TimeInterval = 0
 
     while true {
         if stopFlag.get() || Task.isCancelled {
@@ -1040,6 +1043,9 @@ private func waitForStopKeyOrDuration(
         let now = Date()
         let elapsed = now.timeIntervalSince(lastTick)
         lastTick = now
+        if !isPaused {
+            recordedDuration += elapsed
+        }
 
         if let deadline, now >= deadline {
             return .duration
@@ -1079,6 +1085,10 @@ private func waitForStopKeyOrDuration(
             let count = read(STDIN_FILENO, &buffer, 1)
             if count == 1 {
                 if stopKeys.contains(buffer) {
+                    let capturedDuration = isPaused
+                        ? recordedDuration
+                        : (recordedDuration + Date().timeIntervalSince(lastTick))
+                    log("Stop key '\(stopKeyDisplay)' received at \(formatElapsedDuration(capturedDuration)). Stopping.")
                     return .key
                 }
                 if togglePauseResume && pauseKeys.contains(buffer) {

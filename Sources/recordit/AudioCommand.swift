@@ -10,6 +10,21 @@ func log(_ message: String) {
     FileHandle.standardError.write(data)
 }
 
+func formatElapsedDuration(_ seconds: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(seconds.rounded()))
+    let hours = totalSeconds / 3_600
+    let minutes = (totalSeconds % 3_600) / 60
+    let secs = totalSeconds % 60
+
+    if hours > 0 {
+        return "\(hours)h \(minutes)m \(secs)s"
+    }
+    if minutes > 0 {
+        return "\(minutes)m \(secs)s"
+    }
+    return "\(secs)s"
+}
+
 enum StopReason: String, Codable {
     case key
     case duration
@@ -246,6 +261,7 @@ func waitForStopKeyOrDuration(
     _ duration: Double?,
     splitDuration: Double?,
     stopKeys: Set<UInt8>,
+    stopKeyDisplay: String,
     pauseKeys: Set<UInt8>,
     resumeKeys: Set<UInt8>,
     pauseKeyDisplay: String,
@@ -270,6 +286,7 @@ func waitForStopKeyOrDuration(
     var nextSizeCheck = Date()
     let fileManager = FileManager.default
     var lastTick = Date()
+    var recordedDuration: TimeInterval = 0
 
     while true {
         if Task.isCancelled {
@@ -279,6 +296,9 @@ func waitForStopKeyOrDuration(
         let now = Date()
         let elapsed = now.timeIntervalSince(lastTick)
         lastTick = now
+        if !isPaused {
+            recordedDuration += elapsed
+        }
         if let deadline, now >= deadline {
             return .duration
         }
@@ -337,6 +357,10 @@ func waitForStopKeyOrDuration(
             let count = read(STDIN_FILENO, &buffer, 1)
             if count == 1 {
                 if stopKeys.contains(buffer) {
+                    let capturedDuration = isPaused
+                        ? recordedDuration
+                        : (recordedDuration + Date().timeIntervalSince(lastTick))
+                    log("Stop key '\(stopKeyDisplay)' received at \(formatElapsedDuration(capturedDuration)). Stopping.")
                     return .key
                 }
                 if togglePauseResume && pauseKeys.contains(buffer) {
@@ -831,6 +855,7 @@ struct AudioCommand: AsyncParsableCommand {
                     remainingDuration,
                     splitDuration: split,
                     stopKeys: stopKeys,
+                    stopKeyDisplay: stopKeyDisplay,
                     pauseKeys: pauseKeys,
                     resumeKeys: resumeKeys,
                     pauseKeyDisplay: pauseKeyDisplay,
