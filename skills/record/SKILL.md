@@ -9,6 +9,10 @@ A macOS command-line tool for recording audio, screen, and camera output. Design
 
 Output file paths are printed to **stdout**. Status messages go to **stderr**, making the tool pipeline-friendly.
 
+## IMPORTANT: User Consent Required
+
+**Always ask the user for explicit permission before running any recording command.** Recording audio (microphone), screen, or camera captures sensitive data and may be unexpected. Before executing `record audio`, `record screen`, or `record camera`, confirm with the user that they intend to record, what will be captured, and the duration. Listing devices (`--list-devices`, `--list-displays`, `--list-windows`, `--list-cameras`) and taking screenshots (`--screenshot`) are less intrusive but should still be confirmed if not explicitly requested.
+
 ## Installation
 
 ```bash
