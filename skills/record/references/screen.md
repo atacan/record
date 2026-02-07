@@ -63,6 +63,9 @@ record screen --duration 10 --display primary --fps 60
 # Record with system audio
 record screen --duration 10 --audio system
 
+# Record with system + mic mixed into one audio track
+record screen --duration 10 --audio both
+
 # Record with HEVC codec at lower resolution
 record screen --duration 10 --codec hevc --scale 0.5
 

@@ -1,7 +1,10 @@
 @preconcurrency import AVFoundation
 import ArgumentParser
 import CoreAudio
+import CoreGraphics
+import CoreMedia
 import Foundation
+import ScreenCaptureKit
 import Darwin
 
 // Keep stdout clean for piping: put status/errors on stderr
@@ -395,10 +398,351 @@ func waitForStopKeyOrDuration(
     }
 }
 
+struct AudioDisplayInfo: Codable {
+    let id: UInt32
+    let width: Int
+    let height: Int
+    let frameX: Double
+    let frameY: Double
+    let frameWidth: Double
+    let frameHeight: Double
+}
+
+private func ensureAudioWindowServerConnection() {
+    var count: UInt32 = 0
+    _ = CGGetActiveDisplayList(0, nil, &count)
+}
+
+private func requestAudioScreenRecordingPermission() -> Bool {
+    if CGPreflightScreenCaptureAccess() {
+        return true
+    }
+    return CGRequestScreenCaptureAccess()
+}
+
+private func waitForStopKeyOrDurationForStreamAudio(
+    _ duration: Double?,
+    splitDuration: Double?,
+    stopKeys: Set<UInt8>,
+    stopKeyDisplay: String,
+    pauseKeys: Set<UInt8>,
+    resumeKeys: Set<UInt8>,
+    pauseKeyDisplay: String,
+    resumeKeyDisplay: String,
+    togglePauseResume: Bool,
+    maxSizeBytes: Int64?,
+    outputURL: URL?,
+    recorder: StreamAudioCaptureRecorder?
+) async throws -> StopReason {
+    let rawMode = TerminalRawMode()
+    defer { _ = rawMode }
+
+    let deadline = duration.map { Date().addingTimeInterval($0) }
+    var splitRemaining = splitDuration
+    var buffer: UInt8 = 0
+    var isPaused = false
+    let sizeInterval: TimeInterval = 0.5
+    var nextSizeCheck = Date()
+    let fileManager = FileManager.default
+    var lastTick = Date()
+    var recordedDuration: TimeInterval = 0
+
+    while true {
+        if Task.isCancelled {
+            return .key
+        }
+
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastTick)
+        lastTick = now
+        if !isPaused {
+            recordedDuration += elapsed
+        }
+        if let deadline, now >= deadline {
+            return .duration
+        }
+
+        if let remaining = splitRemaining, !isPaused {
+            let updated = remaining - elapsed
+            splitRemaining = updated
+            if updated <= 0 {
+                return .split
+            }
+        }
+
+        if let maxSizeBytes, let outputURL, now >= nextSizeCheck {
+            if let attrs = try? fileManager.attributesOfItem(atPath: outputURL.path),
+               let size = attrs[.size] as? NSNumber,
+               size.int64Value >= maxSizeBytes {
+                return .maxSize
+            }
+            nextSizeCheck = now.addingTimeInterval(sizeInterval)
+        }
+
+        var timeout = 0.25
+        if let deadline {
+            timeout = min(timeout, max(0, deadline.timeIntervalSince(now)))
+        }
+        if let splitRemaining, !isPaused {
+            timeout = min(timeout, max(0, splitRemaining))
+        }
+        if maxSizeBytes != nil, outputURL != nil {
+            timeout = min(timeout, max(0, nextSizeCheck.timeIntervalSince(now)))
+        }
+        let timeoutMs = Int32(max(1, Int(timeout * 1000)))
+
+        var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&fds, 1, timeoutMs)
+        if ready > 0 && (fds.revents & Int16(POLLIN)) != 0 {
+            let count = read(STDIN_FILENO, &buffer, 1)
+            if count == 1 {
+                if stopKeys.contains(buffer) {
+                    let capturedDuration = isPaused
+                        ? recordedDuration
+                        : (recordedDuration + Date().timeIntervalSince(lastTick))
+                    log("Stop key '\(stopKeyDisplay)' received at \(formatElapsedDuration(capturedDuration)). Stopping.")
+                    return .key
+                }
+                if togglePauseResume && pauseKeys.contains(buffer) {
+                    if isPaused {
+                        recorder?.setPaused(false)
+                        isPaused = false
+                        log("Resumed. Press '\(pauseKeyDisplay)' to pause.")
+                    } else {
+                        recorder?.setPaused(true)
+                        isPaused = true
+                        log("Paused. Press '\(pauseKeyDisplay)' to resume.")
+                    }
+                } else if pauseKeys.contains(buffer), !isPaused {
+                    recorder?.setPaused(true)
+                    isPaused = true
+                    log("Paused. Press '\(resumeKeyDisplay)' to resume.")
+                } else if resumeKeys.contains(buffer), isPaused {
+                    recorder?.setPaused(false)
+                    isPaused = false
+                    log("Resumed.")
+                }
+            }
+        }
+    }
+}
+
+final class StreamAudioCaptureRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
+    private static let queueKey = DispatchSpecificKey<UInt8>()
+    private let stream: SCStream
+    private let queue = DispatchQueue(label: "record.audio.stream.capture")
+    private let stateLock = NSLock()
+    private var paused = false
+    private var pauseStartTime: CMTime?
+    private var pauseOffset = CMTime.zero
+    private var writer: AVAssetWriter?
+    private var input: AVAssetWriterInput?
+    private let outputURL: URL
+    private let outputFileType: AVFileType
+    private let audioSettings: [String: Any]
+    private let audioPipeline: StreamAudioPipeline
+    private let captureSystemAudio: Bool
+    private let captureMicrophoneAudio: Bool
+
+    init(
+        outputURL: URL,
+        fileType: AVFileType,
+        audioSettings: [String: Any],
+        mixMode: StreamAudioMixMode,
+        filter: SCContentFilter,
+        displayWidth: Int,
+        displayHeight: Int,
+        sampleRate: Int,
+        channels: Int
+    ) throws {
+        queue.setSpecific(key: Self.queueKey, value: 1)
+        let configuration = SCStreamConfiguration()
+        configuration.width = max(2, displayWidth)
+        configuration.height = max(2, displayHeight)
+        configuration.queueDepth = 5
+        configuration.capturesAudio = mixMode.capturesSystem
+        configuration.captureMicrophone = mixMode.capturesMicrophone
+        configuration.sampleRate = sampleRate
+        configuration.channelCount = channels
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+
+        self.outputURL = outputURL
+        self.outputFileType = fileType
+        self.audioSettings = audioSettings
+        self.audioPipeline = try StreamAudioPipeline(mode: mixMode, sampleRate: sampleRate, channels: channels)
+        self.captureSystemAudio = mixMode.capturesSystem
+        self.captureMicrophoneAudio = mixMode.capturesMicrophone
+
+        super.init()
+
+        if captureSystemAudio {
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+        }
+        if captureMicrophoneAudio {
+            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: queue)
+        }
+        try initializeWriter()
+    }
+
+    func start() async throws {
+        try await stream.startCapture()
+    }
+
+    func stop() async throws {
+        try await stream.stopCapture()
+        let (writer, input) = accessWriter { (self.writer, self.input) }
+        guard let writer, let input else { return }
+        input.markAsFinished()
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            writer.finishWriting { [self] in
+                let error = accessWriter { self.writer?.error }
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    func setPaused(_ paused: Bool) {
+        stateLock.lock()
+        if paused {
+            if !self.paused {
+                self.paused = true
+                pauseStartTime = CMClockGetTime(CMClockGetHostTimeClock())
+            }
+        } else {
+            if self.paused {
+                self.paused = false
+                if let pauseStartTime {
+                    let now = CMClockGetTime(CMClockGetHostTimeClock())
+                    let delta = CMTimeSubtract(now, pauseStartTime)
+                    if delta.isValid, CMTimeCompare(delta, .zero) == 1 {
+                        pauseOffset = CMTimeAdd(pauseOffset, delta)
+                    }
+                }
+                pauseStartTime = nil
+            }
+        }
+        stateLock.unlock()
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio || type == .microphone else { return }
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        let pauseState = pauseSnapshot()
+        if pauseState.paused { return }
+
+        var adjustedBuffer = sampleBuffer
+        if pauseState.offset.isValid, CMTimeCompare(pauseState.offset, .zero) == 1 {
+            if let shifted = adjustSampleBuffer(sampleBuffer, by: pauseState.offset) {
+                adjustedBuffer = shifted
+            }
+        }
+
+        let source: StreamAudioSourceKind = (type == .audio) ? .system : .microphone
+        let mixedBuffers = audioPipeline.append(sampleBuffer: adjustedBuffer, source: source)
+        let (writer, input) = accessWriter { (self.writer, self.input) }
+        guard let writer, let input else { return }
+
+        for mixedBuffer in mixedBuffers {
+            if writer.status == .unknown {
+                let startTime = CMSampleBufferGetPresentationTimeStamp(mixedBuffer)
+                writer.startWriting()
+                writer.startSession(atSourceTime: startTime)
+            }
+            if writer.status == .failed {
+                log("Writer failed: \(writer.error?.localizedDescription ?? "unknown error")")
+                return
+            }
+            if input.isReadyForMoreMediaData, !input.append(mixedBuffer) {
+                log("Failed to append audio buffer: \(writer.error?.localizedDescription ?? "unknown error")")
+                return
+            }
+        }
+    }
+
+    private func initializeWriter() throws {
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: outputFileType)
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        input.expectsMediaDataInRealTime = true
+        guard writer.canAdd(input) else {
+            throw ValidationError("Unable to configure audio writer input.")
+        }
+        writer.add(input)
+        self.writer = writer
+        self.input = input
+    }
+
+    private func pauseSnapshot() -> (paused: Bool, offset: CMTime) {
+        stateLock.lock()
+        let value = paused
+        let offset = pauseOffset
+        stateLock.unlock()
+        return (value, offset)
+    }
+
+    private func accessWriter<T>(_ block: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return block()
+        }
+        return queue.sync(execute: block)
+    }
+
+    private func adjustSampleBuffer(_ sampleBuffer: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        var timingCount = 0
+        var status = CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        )
+        guard status == noErr, timingCount > 0 else {
+            return sampleBuffer
+        }
+
+        var timing = [CMSampleTimingInfo](
+            repeating: CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid),
+            count: timingCount
+        )
+        status = CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: timingCount,
+            arrayToFill: &timing,
+            entriesNeededOut: &timingCount
+        )
+        guard status == noErr else {
+            return sampleBuffer
+        }
+
+        for index in 0..<timingCount {
+            timing[index].presentationTimeStamp = CMTimeSubtract(timing[index].presentationTimeStamp, offset)
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeSubtract(timing[index].decodeTimeStamp, offset)
+            }
+        }
+
+        var adjusted: CMSampleBuffer?
+        status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sampleBuffer,
+            sampleTimingEntryCount: timingCount,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &adjusted
+        )
+        guard status == noErr else {
+            return sampleBuffer
+        }
+        return adjusted
+    }
+}
+
 struct AudioCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "audio",
-        abstract: "Record audio from the default microphone to a temporary file.",
+        abstract: "Record audio from the microphone, system output, or both to a temporary file.",
         discussion: """
         The output file path is printed to stdout (pipeline-friendly). Status messages \
         go to stderr.
@@ -452,6 +796,31 @@ struct AudioCommand: AsyncParsableCommand {
         }
     }
 
+    enum AudioSource: String, CaseIterable, ExpressibleByArgument {
+        case mic
+        case system
+        case both
+
+        var includesMic: Bool {
+            self == .mic || self == .both
+        }
+
+        var includesSystem: Bool {
+            self == .system || self == .both
+        }
+
+        var mixMode: StreamAudioMixMode {
+            switch self {
+            case .mic:
+                return .microphone
+            case .system:
+                return .system
+            case .both:
+                return .both
+            }
+        }
+    }
+
     @Option(help: "Stop recording after this many seconds. If omitted, press 'S' to stop.")
     var duration: Double?
 
@@ -470,13 +839,22 @@ struct AudioCommand: AsyncParsableCommand {
     @Flag(help: "List available input devices and exit.")
     var listDevices = false
 
+    @Flag(help: "List available displays (for system audio capture) and exit.")
+    var listDisplays = false
+
     @Flag(help: "List available audio formats and exit.")
     var listFormats = false
 
     @Flag(help: "List available encoder qualities and exit.")
     var listQualities = false
 
-    @Option(help: "Input device UID or name to use for recording.")
+    @Option(help: "Audio source: mic, system, or both. Default: mic.")
+    var source: AudioSource?
+
+    @Option(help: "Display ID to use for system audio capture, or 'primary'.")
+    var display: String?
+
+    @Option(help: "Input device UID or name to use for microphone recording.")
     var device: String?
 
     @Option(help: "Stop key (single ASCII character). Default: s.")
@@ -500,16 +878,16 @@ struct AudioCommand: AsyncParsableCommand {
     @Option(help: "Split recording into chunks of this many seconds. Output must be a directory.")
     var split: Double?
 
-    @Option(help: "Sample rate in Hz. Default: 44100.")
+    @Option(help: "Sample rate in Hz. Default: 44100 for mic, 48000 for system/both.")
     var sampleRate: Double?
 
-    @Option(help: "Number of channels. Default: 1.")
+    @Option(help: "Number of channels. Default: 1 for mic, 2 for system/both.")
     var channels: Int?
 
-    @Option(help: "Encoder bit rate in bps. Default: 128000. Ignored for linearPCM.")
+    @Option(help: "Encoder bit rate in bps. Default: 128000 where applicable.")
     var bitRate: Int?
 
-    @Option(help: "Audio format. Default: linearPCM.")
+    @Option(help: "Audio format. Default: linearPCM for mic, aac for system/both.")
     var format: AudioFormat?
 
     @Option(help: "Encoder quality. Default: high.")
@@ -557,31 +935,101 @@ struct AudioCommand: AsyncParsableCommand {
         if let bitRate, bitRate <= 0 {
             throw ValidationError("Bit rate must be greater than 0.")
         }
-    }
 
-    func buildSettings() -> [String: Any] {
-        let resolvedFormat = format ?? .linearPCM
-        var settings: [String: Any] = [
-            AVFormatIDKey: resolvedFormat.formatID,
-            AVSampleRateKey: sampleRate ?? 44_100,
-            AVNumberOfChannelsKey: channels ?? 1,
-            AVEncoderAudioQualityKey: (quality ?? .high).avValue
-        ]
-
-        if resolvedFormat != .linearPCM {
-            if let bitRate {
-                settings[AVEncoderBitRateKey] = bitRate
-            } else {
-                settings[AVEncoderBitRateKey] = 128_000
+        let resolvedSource = source ?? .mic
+        if resolvedSource == .mic {
+            if display != nil {
+                throw ValidationError("--display is only supported with --source system or --source both.")
+            }
+        } else {
+            if device != nil {
+                throw ValidationError("--device is only supported with --source mic.")
+            }
+            if silenceDB != nil || silenceDuration != nil {
+                throw ValidationError("--silence-db and --silence-duration are only supported with --source mic.")
+            }
+            if let format, format != .aac && format != .alac {
+                throw ValidationError("--source system/both supports only aac or alac format.")
             }
         }
 
-        if resolvedFormat == .linearPCM {
+        if let display {
+            let value = display.trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.isEmpty {
+                throw ValidationError("Display selector cannot be empty.")
+            }
+        }
+    }
+
+    func defaultFormat(for source: AudioSource) -> AudioFormat {
+        switch source {
+        case .mic:
+            return .linearPCM
+        case .system, .both:
+            return .aac
+        }
+    }
+
+    func defaultSampleRate(for source: AudioSource) -> Double {
+        switch source {
+        case .mic:
+            return 44_100
+        case .system, .both:
+            return 48_000
+        }
+    }
+
+    func defaultChannels(for source: AudioSource) -> Int {
+        switch source {
+        case .mic:
+            return 1
+        case .system, .both:
+            return 2
+        }
+    }
+
+    func buildMicSettings(
+        format: AudioFormat,
+        sampleRate: Double,
+        channels: Int,
+        quality: AudioQuality,
+        bitRate: Int?
+    ) -> [String: Any] {
+        var settings: [String: Any] = [
+            AVFormatIDKey: format.formatID,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVEncoderAudioQualityKey: quality.avValue
+        ]
+
+        if format != .linearPCM {
+            settings[AVEncoderBitRateKey] = bitRate ?? 128_000
+        } else {
             settings[AVLinearPCMBitDepthKey] = 16
             settings[AVLinearPCMIsFloatKey] = false
             settings[AVLinearPCMIsBigEndianKey] = false
         }
 
+        return settings
+    }
+
+    func buildStreamSettings(
+        format: AudioFormat,
+        sampleRate: Int,
+        channels: Int,
+        quality: AudioQuality,
+        bitRate: Int?
+    ) -> [String: Any] {
+        var settings: [String: Any] = [
+            AVFormatIDKey: format.formatID,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVEncoderAudioQualityKey: quality.avValue
+        ]
+
+        if format == .aac {
+            settings[AVEncoderBitRateKey] = bitRate ?? 128_000
+        }
         return settings
     }
 
@@ -676,6 +1124,48 @@ struct AudioCommand: AsyncParsableCommand {
         return keys
     }
 
+    func listAvailableDisplays(json: Bool) async throws {
+        ensureAudioWindowServerConnection()
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        if json {
+            let displays = content.displays.map {
+                AudioDisplayInfo(
+                    id: $0.displayID,
+                    width: $0.width,
+                    height: $0.height,
+                    frameX: $0.frame.origin.x,
+                    frameY: $0.frame.origin.y,
+                    frameWidth: $0.frame.size.width,
+                    frameHeight: $0.frame.size.height
+                )
+            }
+            let data = try JSONEncoder().encode(displays)
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        } else {
+            for display in content.displays {
+                print("\(display.displayID)\t\(display.width)x\(display.height)\t\(display.frame)")
+            }
+        }
+    }
+
+    func resolveDisplay(selector: String?, displays: [SCDisplay]) throws -> SCDisplay {
+        guard !displays.isEmpty else {
+            throw ValidationError("No displays available for system audio capture.")
+        }
+
+        guard let selector else {
+            return displays[0]
+        }
+        if selector.lowercased() == "primary" {
+            return displays[0]
+        }
+        if let displayID = UInt32(selector), let match = displays.first(where: { $0.displayID == displayID }) {
+            return match
+        }
+        throw ValidationError("No display '\(selector)'. Use --list-displays to see available displays.")
+    }
+
     mutating func run() async throws {
         do {
             if listFormats {
@@ -741,20 +1231,59 @@ struct AudioCommand: AsyncParsableCommand {
                 return
             }
 
-            let granted = await requestMicrophonePermission()
-            guard granted else {
-                log("""
-                Microphone permission not granted.
+            if listDisplays {
+                guard requestAudioScreenRecordingPermission() else {
+                    log("""
+                    Screen Recording permission not granted.
 
-                Since this is a CLI tool, macOS usually assigns microphone permission to your terminal app.
-                Enable it in:
-                  System Settings → Privacy & Security → Microphone → (Terminal / iTerm / your terminal)
-                """)
-                throw ExitCode(2)
+                    Enable it in:
+                      System Settings → Privacy & Security → Screen Recording → (Terminal / iTerm / your terminal)
+                    """)
+                    throw ExitCode(2)
+                }
+                try await listAvailableDisplays(json: json)
+                return
+            }
+
+            let resolvedSource = source ?? .mic
+            let resolvedFormat = format ?? defaultFormat(for: resolvedSource)
+            let resolvedSampleRate = sampleRate ?? defaultSampleRate(for: resolvedSource)
+            let resolvedChannels = channels ?? defaultChannels(for: resolvedSource)
+            let resolvedQuality = quality ?? .high
+            let resolvedBitRate = bitRate
+
+            if resolvedSource.includesMic {
+                let granted = await requestMicrophonePermission()
+                guard granted else {
+                    log("""
+                    Microphone permission not granted.
+
+                    Since this is a CLI tool, macOS usually assigns microphone permission to your terminal app.
+                    Enable it in:
+                      System Settings → Privacy & Security → Microphone → (Terminal / iTerm / your terminal)
+                    """)
+                    throw ExitCode(2)
+                }
+            }
+
+            var selectedDisplay: SCDisplay?
+            if resolvedSource.includesSystem {
+                guard requestAudioScreenRecordingPermission() else {
+                    log("""
+                    Screen Recording permission not granted.
+
+                    Enable it in:
+                      System Settings → Privacy & Security → Screen Recording → (Terminal / iTerm / your terminal)
+                    """)
+                    throw ExitCode(2)
+                }
+                ensureAudioWindowServerConnection()
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                selectedDisplay = try resolveDisplay(selector: display, displays: content.displays)
             }
 
             var restoreDeviceID: AudioDeviceID?
-            if let device {
+            if resolvedSource == .mic, let device {
                 let devices = try listInputDevices()
                 let matches = devices.filter {
                     $0.uid.caseInsensitiveCompare(device) == .orderedSame ||
@@ -787,15 +1316,16 @@ struct AudioCommand: AsyncParsableCommand {
             let stopKeyDisplay = stopKeyValue.uppercased()
             let pauseKeyDisplay = pauseKeyValue.uppercased()
             let resumeKeyDisplay = resumeKeyValue.uppercased()
+
             let silenceConfig: SilenceConfig?
             if let silenceDB, let silenceDuration {
                 silenceConfig = SilenceConfig(db: silenceDB, duration: silenceDuration)
             } else {
                 silenceConfig = nil
             }
-            let maxSizeBytes = maxSizeMB.map { Int64($0 * 1_048_576) }
 
-            let extensionOverride = (format ?? .linearPCM).fileExtension
+            let maxSizeBytes = maxSizeMB.map { Int64($0 * 1_048_576) }
+            let extensionOverride = resolvedFormat.fileExtension
             let overallDeadline = duration.map { Date().addingTimeInterval($0) }
             let shouldSplit = split != nil
             var chunkIndex = 1
@@ -819,57 +1349,131 @@ struct AudioCommand: AsyncParsableCommand {
                     }
                 }
 
-                let recorder = await MainActor.run { AudioRecorder(outputURL: url, settings: buildSettings()) }
-                try await MainActor.run { try recorder.start() }
-                if silenceConfig != nil {
-                    await MainActor.run { recorder.setMeteringEnabled(true) }
-                }
-
-                var stopMessage = "press '\(stopKeyDisplay)' to stop"
-                if pauseKeyValue != stopKeyValue && resumeKeyValue != stopKeyValue {
-                    if togglePauseResume {
-                        stopMessage += ", '\(pauseKeyDisplay)' to pause/resume"
-                    } else {
-                        stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
+                let stopReason: StopReason
+                if resolvedSource == .mic {
+                    let settings = buildMicSettings(
+                        format: resolvedFormat,
+                        sampleRate: resolvedSampleRate,
+                        channels: resolvedChannels,
+                        quality: resolvedQuality,
+                        bitRate: resolvedBitRate
+                    )
+                    let recorder = await MainActor.run { AudioRecorder(outputURL: url, settings: settings) }
+                    try await MainActor.run { try recorder.start() }
+                    if silenceConfig != nil {
+                        await MainActor.run { recorder.setMeteringEnabled(true) }
                     }
-                }
-                if let split {
-                    stopMessage += ", split every \(split)s"
-                }
-                if let maxSizeMB {
-                    stopMessage += " or when file reaches \(maxSizeMB) MB"
-                }
-                if let silenceConfig {
-                    stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
-                }
 
-                let chunkLabel = shouldSplit ? " (chunk \(chunkIndex))" : ""
-                if let duration {
-                    log("Recording\(chunkLabel)… will stop automatically after \(duration) seconds or when you \(stopMessage).")
+                    var stopMessage = "press '\(stopKeyDisplay)' to stop"
+                    if pauseKeyValue != stopKeyValue && resumeKeyValue != stopKeyValue {
+                        if togglePauseResume {
+                            stopMessage += ", '\(pauseKeyDisplay)' to pause/resume"
+                        } else {
+                            stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
+                        }
+                    }
+                    if let split {
+                        stopMessage += ", split every \(split)s"
+                    }
+                    if let maxSizeMB {
+                        stopMessage += " or when file reaches \(maxSizeMB) MB"
+                    }
+                    if let silenceConfig {
+                        stopMessage += " or after \(silenceConfig.duration)s of silence (\(silenceConfig.db)dB)"
+                    }
+
+                    let chunkLabel = shouldSplit ? " (chunk \(chunkIndex))" : ""
+                    if let duration {
+                        log("Recording\(chunkLabel)… will stop automatically after \(duration) seconds or when you \(stopMessage).")
+                    } else {
+                        log("Recording\(chunkLabel)… \(stopMessage).")
+                    }
+
+                    let remainingDuration = overallDeadline.map { max(0, $0.timeIntervalSinceNow) }
+                    stopReason = try await waitForStopKeyOrDuration(
+                        remainingDuration,
+                        splitDuration: split,
+                        stopKeys: stopKeys,
+                        stopKeyDisplay: stopKeyDisplay,
+                        pauseKeys: pauseKeys,
+                        resumeKeys: resumeKeys,
+                        pauseKeyDisplay: pauseKeyDisplay,
+                        resumeKeyDisplay: resumeKeyDisplay,
+                        togglePauseResume: togglePauseResume,
+                        maxSizeBytes: maxSizeBytes,
+                        outputURL: url,
+                        silence: silenceConfig,
+                        recorder: recorder
+                    )
+
+                    await MainActor.run { recorder.stop() }
                 } else {
-                    log("Recording\(chunkLabel)… \(stopMessage).")
+                    guard let selectedDisplay else {
+                        throw ValidationError("No display available for system audio capture.")
+                    }
+
+                    let filter = SCContentFilter(display: selectedDisplay, excludingWindows: [])
+                    let streamSampleRate = Int(resolvedSampleRate.rounded())
+                    let settings = buildStreamSettings(
+                        format: resolvedFormat,
+                        sampleRate: streamSampleRate,
+                        channels: resolvedChannels,
+                        quality: resolvedQuality,
+                        bitRate: resolvedBitRate
+                    )
+                    let recorder = try StreamAudioCaptureRecorder(
+                        outputURL: url,
+                        fileType: .m4a,
+                        audioSettings: settings,
+                        mixMode: resolvedSource.mixMode,
+                        filter: filter,
+                        displayWidth: selectedDisplay.width,
+                        displayHeight: selectedDisplay.height,
+                        sampleRate: streamSampleRate,
+                        channels: resolvedChannels
+                    )
+
+                    var stopMessage = "press '\(stopKeyDisplay)' to stop"
+                    if pauseKeyValue != stopKeyValue && resumeKeyValue != stopKeyValue {
+                        if togglePauseResume {
+                            stopMessage += ", '\(pauseKeyDisplay)' to pause/resume"
+                        } else {
+                            stopMessage += ", '\(pauseKeyDisplay)' to pause, '\(resumeKeyDisplay)' to resume"
+                        }
+                    }
+                    if let split {
+                        stopMessage += ", split every \(split)s"
+                    }
+                    if let maxSizeMB {
+                        stopMessage += " or when file reaches \(maxSizeMB) MB"
+                    }
+
+                    let chunkLabel = shouldSplit ? " (chunk \(chunkIndex))" : ""
+                    if let duration {
+                        log("Recording\(chunkLabel)… will stop automatically after \(duration) seconds or when you \(stopMessage).")
+                    } else {
+                        log("Recording\(chunkLabel)… \(stopMessage).")
+                    }
+
+                    try await recorder.start()
+                    let remainingDuration = overallDeadline.map { max(0, $0.timeIntervalSinceNow) }
+                    stopReason = try await waitForStopKeyOrDurationForStreamAudio(
+                        remainingDuration,
+                        splitDuration: split,
+                        stopKeys: stopKeys,
+                        stopKeyDisplay: stopKeyDisplay,
+                        pauseKeys: pauseKeys,
+                        resumeKeys: resumeKeys,
+                        pauseKeyDisplay: pauseKeyDisplay,
+                        resumeKeyDisplay: resumeKeyDisplay,
+                        togglePauseResume: togglePauseResume,
+                        maxSizeBytes: maxSizeBytes,
+                        outputURL: url,
+                        recorder: recorder
+                    )
+                    try await recorder.stop()
                 }
 
-                let remainingDuration = overallDeadline.map { max(0, $0.timeIntervalSinceNow) }
-                let stopReason = try await waitForStopKeyOrDuration(
-                    remainingDuration,
-                    splitDuration: split,
-                    stopKeys: stopKeys,
-                    stopKeyDisplay: stopKeyDisplay,
-                    pauseKeys: pauseKeys,
-                    resumeKeys: resumeKeys,
-                    pauseKeyDisplay: pauseKeyDisplay,
-                    resumeKeyDisplay: resumeKeyDisplay,
-                    togglePauseResume: togglePauseResume,
-                    maxSizeBytes: maxSizeBytes,
-                    outputURL: url,
-                    silence: silenceConfig,
-                    recorder: recorder
-                )
-
-                await MainActor.run { recorder.stop() }
-
-                // stdout: print ONLY the URL (pipeline-friendly)
                 if json {
                     struct Output: Codable {
                         let path: String
@@ -878,20 +1482,30 @@ struct AudioCommand: AsyncParsableCommand {
                         let channels: Int
                         let bitRate: Int?
                         let quality: String
+                        let source: String
+                        let display: String?
                         let duration: Double?
                         let maxSizeMB: Double?
                         let chunk: Int
                         let stopReason: StopReason
                     }
 
-                    let resolvedFormat = (format ?? .linearPCM)
+                    let effectiveBitRate: Int?
+                    if resolvedSource == .mic {
+                        effectiveBitRate = resolvedFormat == .linearPCM ? nil : (resolvedBitRate ?? 128_000)
+                    } else {
+                        effectiveBitRate = resolvedFormat == .aac ? (resolvedBitRate ?? 128_000) : nil
+                    }
+
                     let out = Output(
                         path: url.path,
                         format: resolvedFormat.rawValue,
-                        sampleRate: sampleRate ?? 44_100,
-                        channels: channels ?? 1,
-                        bitRate: resolvedFormat == .linearPCM ? nil : (bitRate ?? 128_000),
-                        quality: (quality ?? .high).rawValue,
+                        sampleRate: resolvedSampleRate,
+                        channels: resolvedChannels,
+                        bitRate: effectiveBitRate,
+                        quality: resolvedQuality.rawValue,
+                        source: resolvedSource.rawValue,
+                        display: resolvedSource.includesSystem ? (selectedDisplay.map { String($0.displayID) }) : nil,
                         duration: duration,
                         maxSizeMB: maxSizeMB,
                         chunk: chunkIndex,

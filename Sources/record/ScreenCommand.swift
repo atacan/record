@@ -161,6 +161,15 @@ struct ScreenCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         ensureWindowServerConnection()
+        guard requestScreenRecordingPermission() else {
+            log("""
+            Screen Recording permission not granted.
+
+            Enable it in:
+              System Settings → Privacy & Security → Screen Recording → (Terminal / iTerm / your terminal)
+            """)
+            throw ExitCode(2)
+        }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
         if listDisplays {
@@ -405,7 +414,8 @@ struct ScreenCommand: AsyncParsableCommand {
         let audioMode = audio ?? .none
         let audioSampleRateValue = audioSampleRate ?? 48_000
         let audioChannelsValue = audioChannels ?? 2
-        var captureAudio = false
+        var captureSystemAudio = false
+        var captureMicrophoneAudio = false
         var audioSettings: [String: Any]?
         let effectiveAudioMode: ScreenAudio
 
@@ -415,15 +425,11 @@ struct ScreenCommand: AsyncParsableCommand {
             if audioMode != .none {
                 if audioMode == .system || audioMode == .both {
                     config.capturesAudio = true
-                    captureAudio = true
+                    captureSystemAudio = true
                 }
                 if audioMode == .mic || audioMode == .both {
-                    if #available(macOS 15.0, *) {
-                        config.captureMicrophone = true
-                        captureAudio = true
-                    } else {
-                        log("Microphone capture requires macOS 15 or later; ignoring mic audio.")
-                    }
+                    config.captureMicrophone = true
+                    captureMicrophoneAudio = true
                 }
                 config.sampleRate = audioSampleRateValue
                 config.channelCount = audioChannelsValue
@@ -434,7 +440,7 @@ struct ScreenCommand: AsyncParsableCommand {
                     AVEncoderBitRateKey: 128_000
                 ]
             }
-            effectiveAudioMode = captureAudio ? audioMode : .none
+            effectiveAudioMode = (captureSystemAudio || captureMicrophoneAudio) ? audioMode : .none
         }
 
         if screenshot {
@@ -552,7 +558,10 @@ struct ScreenCommand: AsyncParsableCommand {
                 configuration: config,
                 compression: compression,
                 audioSettings: audioSettings,
-                captureAudio: captureAudio
+                captureSystemAudio: captureSystemAudio,
+                captureMicrophoneAudio: captureMicrophoneAudio,
+                audioSampleRate: audioSampleRateValue,
+                audioChannels: audioChannelsValue
             )
 
             var stopMessage = "press '\(stopKeyDisplay)' to stop"
@@ -731,6 +740,13 @@ struct ScreenCommand: AsyncParsableCommand {
 private func ensureWindowServerConnection() {
     var count: UInt32 = 0
     _ = CGGetActiveDisplayList(0, nil, &count)
+}
+
+private func requestScreenRecordingPermission() -> Bool {
+    if CGPreflightScreenCaptureAccess() {
+        return true
+    }
+    return CGRequestScreenCaptureAccess()
 }
 
 private func scaledSize(base: CGSize, scale: Double) -> CGSize {
@@ -1131,7 +1147,10 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
     private let videoCodec: AVVideoCodecType
     private let compression: [String: Any]
     private let audioSettings: [String: Any]?
-    private let captureAudio: Bool
+    private let captureSystemAudio: Bool
+    private let captureMicrophoneAudio: Bool
+    private let audioPipeline: StreamAudioPipeline?
+    private var sessionStartTime: CMTime?
 
     init(
         outputURL: URL,
@@ -1141,7 +1160,10 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         configuration: SCStreamConfiguration,
         compression: [String: Any],
         audioSettings: [String: Any]?,
-        captureAudio: Bool
+        captureSystemAudio: Bool,
+        captureMicrophoneAudio: Bool,
+        audioSampleRate: Int,
+        audioChannels: Int
     ) throws {
         queue.setSpecific(key: Self.queueKey, value: 1)
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
@@ -1150,13 +1172,34 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         self.videoCodec = videoCodec
         self.compression = compression
         self.audioSettings = audioSettings
-        self.captureAudio = captureAudio
+        self.captureSystemAudio = captureSystemAudio
+        self.captureMicrophoneAudio = captureMicrophoneAudio
+        if captureSystemAudio || captureMicrophoneAudio {
+            let mixMode: StreamAudioMixMode
+            if captureSystemAudio && captureMicrophoneAudio {
+                mixMode = .both
+            } else if captureSystemAudio {
+                mixMode = .system
+            } else {
+                mixMode = .microphone
+            }
+            self.audioPipeline = try StreamAudioPipeline(
+                mode: mixMode,
+                sampleRate: audioSampleRate,
+                channels: audioChannels
+            )
+        } else {
+            self.audioPipeline = nil
+        }
 
         super.init()
 
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-        if captureAudio {
+        if captureSystemAudio {
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+        }
+        if captureMicrophoneAudio {
+            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: queue)
         }
     }
 
@@ -1184,7 +1227,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen || type == .audio else { return }
+        guard type == .screen || type == .audio || type == .microphone else { return }
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
         let pauseState = pauseSnapshot()
         if pauseState.paused { return }
@@ -1211,16 +1254,29 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         }
 
         if type == .screen {
-            if input.isReadyForMoreMediaData {
-                if !input.append(adjustedBuffer) {
-                    log("Failed to append video buffer: \(writer.error?.localizedDescription ?? "unknown error")")
-                }
+            if input.isReadyForMoreMediaData, !input.append(adjustedBuffer) {
+                log("Failed to append video buffer: \(writer.error?.localizedDescription ?? "unknown error")")
             }
-        } else if type == .audio, let audioInput, writer.status != .unknown {
-            if audioInput.isReadyForMoreMediaData {
-                if !audioInput.append(adjustedBuffer) {
-                    log("Failed to append audio buffer: \(writer.error?.localizedDescription ?? "unknown error")")
-                }
+            return
+        }
+
+        guard let audioInput, writer.status != .unknown else {
+            return
+        }
+        guard let audioPipeline else {
+            return
+        }
+
+        let source: StreamAudioSourceKind = (type == .audio) ? .system : .microphone
+        let mixedBuffers = audioPipeline.append(sampleBuffer: adjustedBuffer, source: source)
+        for mixedBuffer in mixedBuffers {
+            let pts = CMSampleBufferGetPresentationTimeStamp(mixedBuffer)
+            if let sessionStartTime, CMTimeCompare(pts, sessionStartTime) < 0 {
+                continue
+            }
+            if audioInput.isReadyForMoreMediaData, !audioInput.append(mixedBuffer) {
+                log("Failed to append audio buffer: \(writer.error?.localizedDescription ?? "unknown error")")
+                return
             }
         }
     }
@@ -1296,7 +1352,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
             }
 
             var audioInput: AVAssetWriterInput?
-            if captureAudio, let audioSettings {
+            if (captureSystemAudio || captureMicrophoneAudio), let audioSettings {
                 let audio = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
                 audio.expectsMediaDataInRealTime = true
                 if writer.canAdd(audio) {
@@ -1314,6 +1370,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
             let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startWriting()
             writer.startSession(atSourceTime: startTime)
+            self.sessionStartTime = startTime
         } catch {
             log("Failed to initialize writer: \(error)")
             return false

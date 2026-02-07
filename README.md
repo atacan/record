@@ -2,6 +2,8 @@
 
 A macOS CLI that records audio, screen, or camera output and prints the output file path.
 
+Requires macOS 15 or newer.
+
 ## Install
 
 ```bash
@@ -51,21 +53,24 @@ record camera [options]
 - `--name <pattern>`: Filename pattern when output is a directory. Supports strftime tokens, `{uuid}`, and `{chunk}`. Default: `micrec-%Y%m%d-%H%M%S` (or `micrec-%Y%m%d-%H%M%S-{chunk}` when splitting).
 - `--overwrite`: Overwrite output file if it exists.
 - `--json`: Print machine-readable JSON to stdout.
+- `--source <mic|system|both>`: Audio source. Default: `mic`.
 - `--list-devices`: List available input devices and exit.
+- `--list-displays`: List available displays (for system audio capture) and exit.
 - `--list-formats`: List available audio formats and exit.
 - `--list-qualities`: List available encoder qualities and exit.
-- `--device <device>`: Input device UID or name to use for recording.
+- `--display <id|primary>`: Display to use for system audio capture (`--source system|both`).
+- `--device <device>`: Input device UID or name to use for mic recording (`--source mic`).
 - `--stop-key <char>`: Stop key (single ASCII character). Default: `s` (case-insensitive).
 - `--pause-key <char>`: Pause key (single ASCII character). Default: `p` (case-insensitive). If same as resume key, toggles pause/resume.
 - `--resume-key <char>`: Resume key (single ASCII character). Default: `r` (case-insensitive). If same as pause key, toggles pause/resume.
-- `--silence-db <db>`: Silence threshold in dBFS (e.g. `-50`). Requires `--silence-duration`.
-- `--silence-duration <seconds>`: Stop after this many seconds of continuous silence. Requires `--silence-db`.
+- `--silence-db <db>`: Silence threshold in dBFS (e.g. `-50`). Requires `--silence-duration` (`--source mic` only).
+- `--silence-duration <seconds>`: Stop after this many seconds of continuous silence. Requires `--silence-db` (`--source mic` only).
 - `--max-size <mb>`: Stop when output file reaches this size in MB.
 - `--split <seconds>`: Split recording into chunks of this many seconds. Output must be a directory.
-- `--sample-rate <hz>`: Sample rate in Hz. Default: `44100`.
-- `--channels <count>`: Number of channels. Default: `1`.
+- `--sample-rate <hz>`: Sample rate in Hz. Default: `44100` for `mic`, `48000` for `system|both`.
+- `--channels <count>`: Number of channels. Default: `1` for `mic`, `2` for `system|both`.
 - `--bit-rate <bps>`: Encoder bit rate in bps. Default: `128000`. Ignored for `linearPCM`.
-- `--format <format>`: Audio format. Default: `linearPCM`.
+- `--format <format>`: Audio format. Default: `linearPCM` for `mic`, `aac` for `system|both`.
 - `--quality <quality>`: Encoder quality. Default: `high`.
 
 Supported formats:
@@ -74,6 +79,10 @@ Supported formats:
 File extension mapping:
 - `aac`, `alac` -> `.m4a`
 - `linearPCM`, `appleIMA4`, `ulaw`, `alaw` -> `.caf`
+
+Source compatibility:
+- `--source mic`: supports all listed formats.
+- `--source system|both`: supports `aac` and `alac`.
 
 ## Screen Options
 
@@ -102,6 +111,8 @@ File extension mapping:
 - `--audio-sample-rate <hz>`: Audio sample rate. Default: `48000`.
 - `--audio-channels <count>`: Audio channel count. Default: `2`.
 - `--screenshot`: Capture a single screenshot instead of a video recording. Image format is inferred from the output extension or defaults to `png`.
+
+When `--audio both` is used, system and microphone are mixed into a single audio track in the output file.
 
 ## Camera Options
 
@@ -133,7 +144,10 @@ Region examples:
 Audio:
 ```bash
 record audio --duration 5
+record audio --source system --duration 5
+record audio --source both --display primary --duration 10
 record audio --list-devices
+record audio --list-displays
 record audio --list-formats --json
 record audio --device "MacBook Pro Microphone" --duration 10
 record audio --stop-key q --duration 30
@@ -181,6 +195,7 @@ record camera --audio --duration 5
 ## Notes
 
 - Microphone permission is required for audio recording. In macOS: System Settings -> Privacy & Security -> Microphone -> enable your terminal app.
+- Screen recording permission is required for `record audio --source system|both`. In macOS: System Settings -> Privacy & Security -> Screen Recording -> enable your terminal app.
 - Screen recording permission is required for screen capture. In macOS: System Settings -> Privacy & Security -> Screen Recording -> enable your terminal app.
 - Camera permission is required for camera capture. In macOS: System Settings -> Privacy & Security -> Camera -> enable your terminal app.
 - Microphone permission is required for camera capture when using `--audio`.

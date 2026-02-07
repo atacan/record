@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "record",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .executable(name: "record", targets: ["record"])
     ],
