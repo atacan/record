@@ -1,9 +1,9 @@
 import ArgumentParser
 
 @main
-struct Recordit: AsyncParsableCommand {
+struct Record: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "recordit",
+        commandName: "record",
         abstract: "Record audio, screen, or camera output from the terminal.",
         subcommands: [AudioCommand.self, ScreenCommand.self, CameraCommand.self],
         defaultSubcommand: AudioCommand.self

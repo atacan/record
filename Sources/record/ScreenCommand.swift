@@ -444,7 +444,7 @@ struct ScreenCommand: AsyncParsableCommand {
                 fileExtension: ScreenshotFormat.png.fileExtension,
                 chunkIndex: nil,
                 requireDirectory: false,
-                prefix: "recordit-screenshot"
+                prefix: "record-screenshot"
             )
 
             if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -861,7 +861,7 @@ private func resolveOutputURL(
     fileExtension: String,
     chunkIndex: Int?,
     requireDirectory: Bool,
-    prefix: String = "recordit-screen"
+    prefix: String = "record-screen"
 ) throws -> URL {
     let fileManager = FileManager.default
     let uuid = UUID()
@@ -958,7 +958,7 @@ private func writeScreenshotImage(
 
 private final class ScreenShotCapturer: NSObject, SCStreamOutput {
     private let stream: SCStream
-    private let queue = DispatchQueue(label: "recordit.screen.screenshot")
+    private let queue = DispatchQueue(label: "record.screen.screenshot")
     private let ciContext = CIContext()
     private let lock = NSLock()
     private var continuation: CheckedContinuation<CGImage, Error>?
@@ -1121,7 +1121,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
-    private let queue = DispatchQueue(label: "recordit.screen.capture")
+    private let queue = DispatchQueue(label: "record.screen.capture")
     private let stateLock = NSLock()
     private var paused = false
     private var pauseStartTime: CMTime?

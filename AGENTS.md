@@ -2,27 +2,27 @@
 
 ## Project summary
 
-recordit is a macOS CLI that records audio or screen output and prints the output file path to stdout. Status messages go to stderr to keep stdout pipeline-friendly.
+record is a macOS CLI that records audio or screen output and prints the output file path to stdout. Status messages go to stderr to keep stdout pipeline-friendly.
 
 ## Key files
 
-- `Sources/recordit/recordit.swift`: Root command and subcommand wiring.
-- `Sources/recordit/AudioCommand.swift`: Audio recording implementation.
-- `Sources/recordit/ScreenCommand.swift`: Screen recording implementation.
+- `Sources/record/record.swift`: Root command and subcommand wiring.
+- `Sources/record/AudioCommand.swift`: Audio recording implementation.
+- `Sources/record/ScreenCommand.swift`: Screen recording implementation.
 - `Package.swift`: SwiftPM manifest.
 
 ## Build and run
 
 ```bash
 swift build
-.build/arm64-apple-macosx/debug/recordit audio --duration 5
-.build/arm64-apple-macosx/debug/recordit screen --duration 5
+.build/arm64-apple-macosx/debug/record audio --duration 5
+.build/arm64-apple-macosx/debug/record screen --duration 5
 ```
 
 ## CLI behavior
 
 - Argument parsing uses Swift Argument Parser (`AsyncParsableCommand`).
-- `recordit` has subcommands: `audio` (default) and `screen`.
+- `record` has subcommands: `audio` (default) and `screen`.
 
 ### Audio defaults
 

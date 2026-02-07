@@ -144,7 +144,7 @@ struct CameraCommand: AsyncParsableCommand {
                     fileExtension: format.fileExtension,
                     chunkIndex: nil,
                     requireDirectory: false,
-                    prefix: "recordit-photo"
+                    prefix: "record-photo"
                 )
 
                 if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -201,7 +201,7 @@ struct CameraCommand: AsyncParsableCommand {
                         fileExtension: "mov",
                         chunkIndex: shouldSplit ? chunkIndex : nil,
                         requireDirectory: shouldSplit,
-                        prefix: "recordit-camera"
+                        prefix: "record-camera"
                     )
 
                     if FileManager.default.fileExists(atPath: url.path) {
@@ -683,7 +683,7 @@ private final class CameraPhotoCapturer: NSObject, AVCaptureVideoDataOutputSampl
     private let session: AVCaptureSession
     private let output: AVCaptureVideoDataOutput
     private let device: AVCaptureDevice
-    private let queue = DispatchQueue(label: "recordit.camera.photo")
+    private let queue = DispatchQueue(label: "record.camera.photo")
     private let ciContext = CIContext()
     private let state = PhotoCaptureState()
 

@@ -1,4 +1,4 @@
-# recordit
+# record
 
 A macOS CLI that records audio, screen, or camera output and prints the output file path.
 
@@ -11,9 +11,9 @@ swift build
 ## Run
 
 ```bash
-.build/arm64-apple-macosx/debug/recordit audio
-.build/arm64-apple-macosx/debug/recordit screen
-.build/arm64-apple-macosx/debug/recordit camera
+.build/arm64-apple-macosx/debug/record audio
+.build/arm64-apple-macosx/debug/record screen
+.build/arm64-apple-macosx/debug/record camera
 ```
 
 The command prints the output file path to stdout. Status messages go to stderr so the output is pipeline-friendly.
@@ -21,9 +21,9 @@ The command prints the output file path to stdout. Status messages go to stderr 
 ## Usage
 
 ```bash
-recordit audio [options]
-recordit screen [options]
-recordit camera [options]
+record audio [options]
+record screen [options]
+record camera [options]
 ```
 
 ## Audio Options
@@ -114,50 +114,50 @@ Region examples:
 
 Audio:
 ```bash
-recordit audio --duration 5
-recordit audio --list-devices
-recordit audio --list-formats --json
-recordit audio --device "MacBook Pro Microphone" --duration 10
-recordit audio --stop-key q --duration 30
-recordit audio --pause-key p --resume-key r
-recordit audio --pause-key p --resume-key p
-recordit audio --silence-db -50 --silence-duration 3
-recordit audio --max-size 50
-recordit audio --split 30 --output /tmp
-recordit audio --split 10 --name "micrec-%Y%m%d-%H%M%S-{chunk}-{uuid}"
-recordit audio --output /tmp --name "micrec-%Y%m%d-%H%M%S-{uuid}"
-recordit audio --output /tmp/meeting.caf --overwrite
-recordit audio --duration 5 --json
-recordit audio --sample-rate 48000 --channels 2 --format aac --quality high
-recordit audio --format linearPCM --sample-rate 44100 --channels 1
+record audio --duration 5
+record audio --list-devices
+record audio --list-formats --json
+record audio --device "MacBook Pro Microphone" --duration 10
+record audio --stop-key q --duration 30
+record audio --pause-key p --resume-key r
+record audio --pause-key p --resume-key p
+record audio --silence-db -50 --silence-duration 3
+record audio --max-size 50
+record audio --split 30 --output /tmp
+record audio --split 10 --name "micrec-%Y%m%d-%H%M%S-{chunk}-{uuid}"
+record audio --output /tmp --name "micrec-%Y%m%d-%H%M%S-{uuid}"
+record audio --output /tmp/meeting.caf --overwrite
+record audio --duration 5 --json
+record audio --sample-rate 48000 --channels 2 --format aac --quality high
+record audio --format linearPCM --sample-rate 44100 --channels 1
 ```
 
 Screen:
 ```bash
-recordit screen --duration 5
-recordit screen --list-displays
-recordit screen --list-windows --json
-recordit screen --display primary --fps 60
-recordit screen --window "Safari" --region 10%,10%,80%,80%
-recordit screen --split 30 --output /tmp
-recordit screen --codec hevc --bit-rate 6000000 --scale 0.5
-recordit screen --audio system
-recordit screen --audio both --audio-sample-rate 48000 --audio-channels 2
-recordit screen --screenshot
-recordit screen --screenshot --window "Safari" --region 10%,10%,80%,80%
-recordit screen --screenshot --output /tmp/screen.jpg --overwrite
+record screen --duration 5
+record screen --list-displays
+record screen --list-windows --json
+record screen --display primary --fps 60
+record screen --window "Safari" --region 10%,10%,80%,80%
+record screen --split 30 --output /tmp
+record screen --codec hevc --bit-rate 6000000 --scale 0.5
+record screen --audio system
+record screen --audio both --audio-sample-rate 48000 --audio-channels 2
+record screen --screenshot
+record screen --screenshot --window "Safari" --region 10%,10%,80%,80%
+record screen --screenshot --output /tmp/screen.jpg --overwrite
 ```
 
 Camera:
 ```bash
-recordit camera --duration 5
-recordit camera --list-cameras
-recordit camera --camera "FaceTime" --duration 10
-recordit camera --photo
-recordit camera --photo --photo-format heic
-recordit camera --resolution 1280x720 --fps 30
-recordit camera --split 30 --output /tmp
-recordit camera --audio --duration 5
+record camera --duration 5
+record camera --list-cameras
+record camera --camera "FaceTime" --duration 10
+record camera --photo
+record camera --photo --photo-format heic
+record camera --resolution 1280x720 --fps 30
+record camera --split 30 --output /tmp
+record camera --audio --duration 5
 ```
 
 ## Notes

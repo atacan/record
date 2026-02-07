@@ -5,20 +5,20 @@
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:recordit}",
-            "name": "Debug recordit",
-            "target": "recordit",
+            "name": "Debug record",
+            "target": "record",
             "configuration": "debug",
-            "preLaunchTask": "swift: Build Debug recordit"
+            "preLaunchTask": "swift: Build Debug record"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:recordit}",
-            "name": "Release recordit",
-            "target": "recordit",
+            "name": "Release record",
+            "target": "record",
             "configuration": "release",
-            "preLaunchTask": "swift: Build Release recordit"
+            "preLaunchTask": "swift: Build Release record"
         }
     ]
 }
