@@ -79,7 +79,8 @@ Supported formats:
 
 File extension mapping:
 - `aac`, `alac` -> `.m4a`
-- `linearPCM`, `appleIMA4`, `ulaw`, `alaw` -> `.caf`
+- `linearPCM` -> `.wav`
+- `appleIMA4`, `ulaw`, `alaw` -> `.caf`
 
 Source compatibility:
 - `--source mic`: supports all listed formats.
@@ -161,7 +162,7 @@ record audio --max-size 50
 record audio --split 30 --output /tmp
 record audio --split 10 --name "micrec-%Y%m%d-%H%M%S-{chunk}-{uuid}"
 record audio --output /tmp --name "micrec-%Y%m%d-%H%M%S-{uuid}"
-record audio --output /tmp/meeting.caf --overwrite
+record audio --output /tmp/meeting.wav --overwrite
 record audio --duration 5 --json
 record audio --sample-rate 48000 --channels 2 --format aac --quality high
 record audio --format linearPCM --sample-rate 44100 --channels 1

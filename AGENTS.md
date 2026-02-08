@@ -36,7 +36,8 @@ swift build
 
 - Extensions:
   - `aac`, `alac` -> `.m4a`
-  - `linearPCM`, `appleIMA4`, `ulaw`, `alaw` -> `.caf`
+  - `linearPCM` -> `.wav`
+  - `appleIMA4`, `ulaw`, `alaw` -> `.caf`
 - Stop controls: `--stop-key`, `--pause-key`, `--resume-key` (toggle when identical).
 - Auto-stop: `--duration`, `--silence-db` + `--silence-duration`, `--max-size`.
 - Split: `--split` writes multiple chunks; `{chunk}` supported in `--name`.

@@ -77,9 +77,9 @@ private func parseAudioCommand(_ arguments: [String]) throws -> AudioCommand {
 }
 
 @Test func outputExtensionMappingIsStable() throws {
-    let commandCAF = try parseAudioCommand(["--output", NSTemporaryDirectory() + "/record-test-\(UUID().uuidString)"])
-    let cafURL = try commandCAF.resolveOutputURL(extension: AudioCommand.AudioFormat.linearPCM.fileExtension)
-    #expect(cafURL.pathExtension == "caf")
+    let commandWAV = try parseAudioCommand(["--output", NSTemporaryDirectory() + "/record-test-\(UUID().uuidString)"])
+    let wavURL = try commandWAV.resolveOutputURL(extension: AudioCommand.AudioFormat.linearPCM.fileExtension)
+    #expect(wavURL.pathExtension == "wav")
 
     let commandM4A = try parseAudioCommand(["--output", NSTemporaryDirectory() + "/record-test-\(UUID().uuidString)"])
     let m4aURL = try commandM4A.resolveOutputURL(extension: AudioCommand.AudioFormat.aac.fileExtension)

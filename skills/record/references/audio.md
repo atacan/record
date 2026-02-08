@@ -36,7 +36,7 @@
 |---|---|
 | `aac` | `.m4a` |
 | `alac` | `.m4a` |
-| `linearPCM` | `.caf` |
+| `linearPCM` | `.wav` |
 | `appleIMA4` | `.caf` |
 | `ulaw` | `.caf` |
 | `alaw` | `.caf` |
@@ -79,7 +79,7 @@ record audio --split 30 --output /tmp
 record audio --output /tmp --name "meeting-%Y%m%d-%H%M%S-{uuid}"
 
 # Save to specific file, overwrite if exists
-record audio --output /tmp/meeting.caf --overwrite --duration 60
+record audio --output /tmp/meeting.wav --overwrite --duration 60
 
 # JSON output
 record audio --duration 5 --json

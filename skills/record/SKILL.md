@@ -83,7 +83,7 @@ Add `--json` for structured output.
 ### Control output location
 
 ```bash
-record audio --duration 5 --output /tmp/recording.caf
+record audio --duration 5 --output /tmp/recording.wav
 record screen --screenshot --output /tmp/screen.png --overwrite
 ```
 

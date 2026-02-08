@@ -795,7 +795,9 @@ struct AudioCommand: AsyncParsableCommand {
             switch self {
             case .aac, .alac:
                 return "m4a"
-            case .linearPCM, .appleIMA4, .ulaw, .alaw:
+            case .linearPCM:
+                return "wav"
+            case .appleIMA4, .ulaw, .alaw:
                 return "caf"
             }
         }
