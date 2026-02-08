@@ -75,6 +75,13 @@ final class StreamAudioPipeline {
             return result
         }
 
+        mutating func drop(frames: Int) {
+            guard frames > 0 else { return }
+            let sampleCount = min(frames * channels, max(0, samples.count - readIndex))
+            readIndex += sampleCount
+            compactIfNeeded()
+        }
+
         private mutating func compactIfNeeded() {
             guard readIndex > 0 else { return }
             if readIndex >= samples.count {
@@ -237,7 +244,24 @@ final class StreamAudioPipeline {
         case .microphone:
             return microphoneQueue.frameCount
         case .both:
-            return max(systemQueue.frameCount, microphoneQueue.frameCount)
+            // In mixed mode, emit only aligned frame counts so we do not advance
+            // output time twice (once per source callback), which causes slow/choppy audio.
+            let available = min(systemQueue.frameCount, microphoneQueue.frameCount)
+            trimExcessQueueDrift()
+            return available
+        }
+    }
+
+    private func trimExcessQueueDrift() {
+        guard mode == .both else { return }
+        let maxDriftFrames = sampleRate * 2
+        let systemFrames = systemQueue.frameCount
+        let micFrames = microphoneQueue.frameCount
+
+        if systemFrames - micFrames > maxDriftFrames {
+            systemQueue.drop(frames: systemFrames - micFrames - maxDriftFrames)
+        } else if micFrames - systemFrames > maxDriftFrames {
+            microphoneQueue.drop(frames: micFrames - systemFrames - maxDriftFrames)
         }
     }
 
