@@ -22,7 +22,7 @@ fi
 
 VERSION="${1:?Usage: ./release.sh [--formula-only] <version>}"
 TAG="v${VERSION}"
-ARCHIVE_DIR="$SCRIPT_DIR/.build/release/archives"
+ARCHIVE_DIR="$SCRIPT_DIR/.build/dist/archives"
 PLATFORMS="macos-arm64 macos-amd64"
 
 echo "=== Releasing ${PRODUCT_NAME} ${TAG} ==="
@@ -56,7 +56,7 @@ if [[ "$FORMULA_ONLY" == false ]]; then
     mkdir -p "$ARCHIVE_DIR"
     for platform in $PLATFORMS; do
         tmpdir="$(mktemp -d)"
-        cp ".build/release/${PRODUCT_NAME}-${platform#macos-}" "$tmpdir/${PRODUCT_NAME}"
+        cp ".build/dist/${PRODUCT_NAME}-${platform#macos-}" "$tmpdir/${PRODUCT_NAME}"
         tar -czf "$ARCHIVE_DIR/${PRODUCT_NAME}-${VERSION}-${platform}.tar.gz" -C "$tmpdir" "$PRODUCT_NAME"
         rm -rf "$tmpdir"
     done

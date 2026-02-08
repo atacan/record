@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PRODUCT_NAME="record"
-OUTPUT_DIR="$SCRIPT_DIR/.build/release"
+OUTPUT_DIR="$SCRIPT_DIR/.build/dist"
 mkdir -p "$OUTPUT_DIR"
 
 BINARY_ARM64="$OUTPUT_DIR/${PRODUCT_NAME}-arm64"
