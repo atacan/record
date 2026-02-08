@@ -69,6 +69,7 @@ record camera [options]
 - `--split <seconds>`: Split recording into chunks of this many seconds. Output must be a directory.
 - `--sample-rate <hz>`: Sample rate in Hz. Default: `44100` for `mic`, `48000` for `system|both`.
 - `--channels <count>`: Number of channels. Default: `1` for `mic`, `2` for `system|both`.
+- `--system-gain <multiplier>`: Gain multiplier for system audio with `--source system|both`. Default: `1.0`.
 - `--bit-rate <bps>`: Encoder bit rate in bps. Default: `128000`. Ignored for `linearPCM`.
 - `--format <format>`: Audio format. Default: `linearPCM` for `mic`, `aac` for `system|both`.
 - `--quality <quality>`: Encoder quality. Default: `high`.
@@ -110,6 +111,7 @@ Source compatibility:
 - `--audio <none|system|mic|both>`: Capture system and/or mic audio. Default: `none`.
 - `--audio-sample-rate <hz>`: Audio sample rate. Default: `48000`.
 - `--audio-channels <count>`: Audio channel count. Default: `2`.
+- `--system-gain <multiplier>`: Gain multiplier for system audio with `--audio system|both`. Default: `1.0`.
 - `--screenshot`: Capture a single screenshot instead of a video recording. Image format is inferred from the output extension or defaults to `png`.
 
 When `--audio both` is used, system and microphone are mixed into a single audio track in the output file.
@@ -145,6 +147,7 @@ Audio:
 ```bash
 record audio --duration 5
 record audio --source system --duration 5
+record audio --source both --system-gain 2.0 --duration 10
 record audio --source both --display primary --duration 10
 record audio --list-devices
 record audio --list-displays
@@ -174,6 +177,7 @@ record screen --window "Safari" --region 10%,10%,80%,80%
 record screen --split 30 --output /tmp
 record screen --codec hevc --bit-rate 6000000 --scale 0.5
 record screen --audio system
+record screen --audio both --system-gain 1.8
 record screen --audio both --audio-sample-rate 48000 --audio-channels 2
 record screen --screenshot
 record screen --screenshot --window "Safari" --region 10%,10%,80%,80%

@@ -159,6 +159,9 @@ struct ScreenCommand: AsyncParsableCommand {
     @Option(help: "Audio channel count. Default: 2.")
     var audioChannels: Int?
 
+    @Option(name: .customLong("system-gain"), help: "Gain multiplier for system audio when using --audio system|both. Default: 1.0.")
+    var systemGain: Double?
+
     mutating func run() async throws {
         ensureWindowServerConnection()
         guard requestScreenRecordingPermission() else {
@@ -345,6 +348,9 @@ struct ScreenCommand: AsyncParsableCommand {
             if let audioChannels, audioChannels <= 0 {
                 throw ValidationError("Audio channels must be greater than 0.")
             }
+            if let systemGain, systemGain <= 0 {
+                throw ValidationError("System gain must be greater than 0.")
+            }
         }
 
         let maxSizeBytes = maxSizeMB.map { Int64($0 * 1_048_576) }
@@ -414,6 +420,7 @@ struct ScreenCommand: AsyncParsableCommand {
         let audioMode = audio ?? .none
         let audioSampleRateValue = audioSampleRate ?? 48_000
         let audioChannelsValue = audioChannels ?? 2
+        let systemGainValue = Float(systemGain ?? 1.0)
         var microphoneCaptureDeviceID: String?
         var captureSystemAudio = false
         var captureMicrophoneAudio = false
@@ -427,6 +434,8 @@ struct ScreenCommand: AsyncParsableCommand {
                 if audioMode == .system || audioMode == .both {
                     config.capturesAudio = true
                     captureSystemAudio = true
+                } else if systemGain != nil {
+                    throw ValidationError("--system-gain is only supported with --audio system or --audio both.")
                 }
                 if audioMode == .mic || audioMode == .both {
                     let micGranted = await requestMicrophonePermission()
@@ -577,6 +586,7 @@ struct ScreenCommand: AsyncParsableCommand {
                 captureSystemAudio: captureSystemAudio,
                 captureMicrophoneAudio: captureMicrophoneAudio,
                 microphoneCaptureDeviceID: microphoneCaptureDeviceID,
+                systemGain: systemGainValue,
                 audioSampleRate: audioSampleRateValue,
                 audioChannels: audioChannelsValue
             )
@@ -637,6 +647,7 @@ struct ScreenCommand: AsyncParsableCommand {
                     let audio: String
                     let audioSampleRate: Int?
                     let audioChannels: Int?
+                    let systemGain: Double?
                     let duration: Double?
                     let maxSizeMB: Double?
                     let split: Double?
@@ -653,6 +664,7 @@ struct ScreenCommand: AsyncParsableCommand {
                     audio: effectiveAudioMode.rawValue,
                     audioSampleRate: effectiveAudioMode == .none ? nil : audioSampleRateValue,
                     audioChannels: effectiveAudioMode == .none ? nil : audioChannelsValue,
+                    systemGain: (effectiveAudioMode == .system || effectiveAudioMode == .both) ? Double(systemGainValue) : nil,
                     duration: duration,
                     maxSizeMB: maxSizeMB,
                     split: split,
@@ -1182,6 +1194,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         captureSystemAudio: Bool,
         captureMicrophoneAudio: Bool,
         microphoneCaptureDeviceID: String?,
+        systemGain: Float,
         audioSampleRate: Int,
         audioChannels: Int
     ) throws {
@@ -1210,7 +1223,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
             self.audioPipeline = try StreamAudioPipeline(
                 mode: mixMode,
                 sampleRate: audioSampleRate,
-                channels: audioChannels
+                channels: audioChannels,
+                systemGain: systemGain
             )
         } else {
             self.audioPipeline = nil

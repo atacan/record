@@ -25,6 +25,7 @@
 | `--split <seconds>` | Split into chunks. Output must be a directory. | - |
 | `--sample-rate <Hz>` | Sample rate. | 44100 (mic), 48000 (system/both) |
 | `--channels <count>` | Channel count. | 1 (mic), 2 (system/both) |
+| `--system-gain <multiplier>` | Gain multiplier for system audio (`system`/`both`). | 1.0 |
 | `--bit-rate <bps>` | Encoder bit rate. Ignored for linearPCM. | 128000 |
 | `--format <format>` | Audio format. | linearPCM (mic), aac (system/both) |
 | `--quality <quality>` | Encoder quality. | high |
@@ -55,6 +56,9 @@ record audio --source system --duration 5
 
 # Record system + mic audio mixed into one track
 record audio --source both --display primary --duration 10
+
+# Boost system audio in mixed capture
+record audio --source both --system-gain 2.0 --duration 10
 
 # Record with specific device
 record audio --device "MacBook Pro Microphone" --duration 10

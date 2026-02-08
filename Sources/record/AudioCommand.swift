@@ -551,6 +551,7 @@ final class StreamAudioCaptureRecorder: NSObject, SCStreamOutput, @unchecked Sen
         fileType: AVFileType,
         audioSettings: [String: Any],
         mixMode: StreamAudioMixMode,
+        systemGain: Float,
         microphoneCaptureDeviceID: String?,
         filter: SCContentFilter,
         displayWidth: Int,
@@ -576,7 +577,12 @@ final class StreamAudioCaptureRecorder: NSObject, SCStreamOutput, @unchecked Sen
         self.outputURL = outputURL
         self.outputFileType = fileType
         self.audioSettings = audioSettings
-        self.audioPipeline = try StreamAudioPipeline(mode: mixMode, sampleRate: sampleRate, channels: channels)
+        self.audioPipeline = try StreamAudioPipeline(
+            mode: mixMode,
+            sampleRate: sampleRate,
+            channels: channels,
+            systemGain: systemGain
+        )
         self.captureSystemAudio = mixMode.capturesSystem
         self.captureMicrophoneAudio = mixMode.capturesMicrophone
 
@@ -901,6 +907,9 @@ struct AudioCommand: AsyncParsableCommand {
     @Option(help: "Number of channels. Default: 1 for mic, 2 for system/both.")
     var channels: Int?
 
+    @Option(name: .customLong("system-gain"), help: "Gain multiplier for system audio when using --source system|both. Default: 1.0.")
+    var systemGain: Double?
+
     @Option(help: "Encoder bit rate in bps. Default: 128000 where applicable.")
     var bitRate: Int?
 
@@ -952,11 +961,17 @@ struct AudioCommand: AsyncParsableCommand {
         if let bitRate, bitRate <= 0 {
             throw ValidationError("Bit rate must be greater than 0.")
         }
+        if let systemGain, systemGain <= 0 {
+            throw ValidationError("System gain must be greater than 0.")
+        }
 
         let resolvedSource = source ?? .mic
         if resolvedSource == .mic {
             if display != nil {
                 throw ValidationError("--display is only supported with --source system or --source both.")
+            }
+            if systemGain != nil {
+                throw ValidationError("--system-gain is only supported with --source system or --source both.")
             }
         } else {
             if device != nil {
@@ -1266,6 +1281,7 @@ struct AudioCommand: AsyncParsableCommand {
             let resolvedFormat = format ?? defaultFormat(for: resolvedSource)
             let resolvedSampleRate = sampleRate ?? defaultSampleRate(for: resolvedSource)
             let resolvedChannels = channels ?? defaultChannels(for: resolvedSource)
+            let resolvedSystemGain = Float(systemGain ?? 1.0)
             let resolvedQuality = quality ?? .high
             let resolvedBitRate = bitRate
 
@@ -1452,6 +1468,7 @@ struct AudioCommand: AsyncParsableCommand {
                         fileType: .m4a,
                         audioSettings: settings,
                         mixMode: resolvedSource.mixMode,
+                        systemGain: resolvedSystemGain,
                         microphoneCaptureDeviceID: microphoneCaptureDeviceID,
                         filter: filter,
                         displayWidth: selectedDisplay.width,
@@ -1511,6 +1528,7 @@ struct AudioCommand: AsyncParsableCommand {
                         let quality: String
                         let source: String
                         let display: String?
+                        let systemGain: Double?
                         let duration: Double?
                         let maxSizeMB: Double?
                         let chunk: Int
@@ -1533,6 +1551,7 @@ struct AudioCommand: AsyncParsableCommand {
                         quality: resolvedQuality.rawValue,
                         source: resolvedSource.rawValue,
                         display: resolvedSource.includesSystem ? (selectedDisplay.map { String($0.displayID) }) : nil,
+                        systemGain: resolvedSource.includesSystem ? Double(resolvedSystemGain) : nil,
                         duration: duration,
                         maxSizeMB: maxSizeMB,
                         chunk: chunkIndex,

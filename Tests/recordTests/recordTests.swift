@@ -41,6 +41,26 @@ private func parseAudioCommand(_ arguments: [String]) throws -> AudioCommand {
     #expect(threw)
 }
 
+@Test func micSourceRejectsSystemGain() {
+    var threw = false
+    do {
+        _ = try parseAudioCommand(["--source", "mic", "--system-gain", "1.5"])
+    } catch {
+        threw = true
+    }
+    #expect(threw)
+}
+
+@Test func systemGainMustBePositive() {
+    var threw = false
+    do {
+        _ = try parseAudioCommand(["--source", "both", "--system-gain", "0"])
+    } catch {
+        threw = true
+    }
+    #expect(threw)
+}
+
 @Test func sourceDefaultsMatchDesign() throws {
     let command = try parseAudioCommand([])
 
@@ -70,4 +90,7 @@ private func parseAudioCommand(_ arguments: [String]) throws -> AudioCommand {
 
     let neutral = StreamAudioPipeline.mixSample(system: 0.5, microphone: -0.5)
     #expect(abs(neutral) < 0.0001)
+
+    let boosted = StreamAudioPipeline.mixSample(system: 0.4, microphone: 0.2, systemGain: 2.0)
+    #expect(abs(boosted - 0.5) < 0.0001)
 }

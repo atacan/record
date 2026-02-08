@@ -28,6 +28,7 @@
 | `--audio <mode>` | Audio: `none`, `system`, `mic`, `both`. | none |
 | `--audio-sample-rate <Hz>` | Audio sample rate. | 48000 |
 | `--audio-channels <count>` | Audio channels. | 2 |
+| `--system-gain <multiplier>` | Gain multiplier for system audio with `system`/`both`. | 1.0 |
 | `--screenshot` | Capture a single screenshot instead of video. | false |
 
 ## Region Specification
@@ -65,6 +66,9 @@ record screen --duration 10 --audio system
 
 # Record with system + mic mixed into one audio track
 record screen --duration 10 --audio both
+
+# Boost system audio in mixed capture
+record screen --duration 10 --audio both --system-gain 1.8
 
 # Record with HEVC codec at lower resolution
 record screen --duration 10 --codec hevc --scale 0.5

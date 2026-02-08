@@ -97,6 +97,7 @@ final class StreamAudioPipeline {
     let mode: StreamAudioMixMode
     let sampleRate: Int
     let channels: Int
+    let systemGain: Float
 
     private let targetFormat: AVAudioFormat
     private let targetFormatDescription: CMAudioFormatDescription
@@ -109,7 +110,7 @@ final class StreamAudioPipeline {
     private var loggedConversionFailureSources: Set<StreamAudioSourceKind> = []
     private var loggedEmptyConversionSources: Set<StreamAudioSourceKind> = []
 
-    init(mode: StreamAudioMixMode, sampleRate: Int, channels: Int) throws {
+    init(mode: StreamAudioMixMode, sampleRate: Int, channels: Int, systemGain: Float = 1.0) throws {
         guard sampleRate > 0 else {
             throw NSError(
                 domain: "record.StreamAudioPipeline",
@@ -160,6 +161,7 @@ final class StreamAudioPipeline {
         self.mode = mode
         self.sampleRate = sampleRate
         self.channels = channels
+        self.systemGain = max(0.0, systemGain)
         self.targetFormat = format
         self.targetFormatDescription = formatDescription
         self.systemQueue = FloatSampleQueue(channels: channels)
@@ -268,7 +270,7 @@ final class StreamAudioPipeline {
     private func mixedSamples(frames: Int) -> [Float] {
         switch mode {
         case .system:
-            return systemQueue.pop(frames: frames)
+            return applyGain(systemQueue.pop(frames: frames), gain: systemGain)
         case .microphone:
             return microphoneQueue.pop(frames: frames)
         case .both:
@@ -276,15 +278,24 @@ final class StreamAudioPipeline {
             let microphone = microphoneQueue.pop(frames: frames)
             var mixed = [Float](repeating: 0, count: system.count)
             for index in 0..<system.count {
-                mixed[index] = Self.mixSample(system: system[index], microphone: microphone[index])
+                mixed[index] = Self.mixSample(system: system[index], microphone: microphone[index], systemGain: systemGain)
             }
             return mixed
         }
     }
 
-    static func mixSample(system: Float, microphone: Float) -> Float {
-        let value = (system + microphone) * 0.5
+    static func mixSample(system: Float, microphone: Float, systemGain: Float = 1.0) -> Float {
+        let value = ((system * systemGain) + microphone) * 0.5
         return max(-1.0, min(1.0, value))
+    }
+
+    private func applyGain(_ samples: [Float], gain: Float) -> [Float] {
+        guard gain != 1.0 else { return samples }
+        var output = samples
+        for index in 0..<output.count {
+            output[index] = max(-1.0, min(1.0, output[index] * gain))
+        }
+        return output
     }
 
     private func makeSampleBuffer(samples: [Float], frameCount: Int, pts: CMTime) -> CMSampleBuffer? {
