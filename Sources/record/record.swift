@@ -1,6 +1,6 @@
 import ArgumentParser
 
-let appVersion = "0.2.0"
+let appVersion = "0.2.1"
 
 @main
 struct Record: AsyncParsableCommand {
