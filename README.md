@@ -1,5 +1,7 @@
 # record
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/atacan/record)
+
 A macOS CLI that records audio, screen, or camera output and prints the output file path.
 
 Requires macOS 15 or newer.
